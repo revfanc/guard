@@ -1,23 +1,29 @@
-# 嵌套 Guard
+# 多层 Guard
 
-Guard 使用 LIFO 顺序，适合页面、流程和覆盖层各自声明返回决策。
+多个 guard 按后创建优先（LIFO）工作，但不会自动向下传递，也不会替其他层作决定。
 
 ```ts
+let pageAttempt: BackAttempt | undefined
+
 const pageGuard = createBackGuard({
-  onBack({ leave }) {
-    showPageExitDialog(leave)
+  onBack(attempt) {
+    pageAttempt = attempt
+    showPageExitDialog()
   },
 })
 
 const modalGuard = createBackGuard({
-  onBack({ leave, reset }) {
-    closeModal()
-    leave() // 将同一次返回意图交给 pageGuard
-    // 如果只想关闭弹窗并结束本次意图，应在业务中重新组织 guard 生命周期。
+  onBack({ stay, done }) {
+    showModalDialog({
+      cancel: stay,
+      confirm: () => done(closeModal),
+    })
   },
 })
 ```
 
-第一次返回只通知栈顶 `modalGuard`。它调用 `leave()` 后，`pageGuard` 会收到 `source: "cascade"`。只有所有层都调用 `leave()`，浏览器才真正返回。
+若 `pageGuard` 已经在提示时创建并触发 `modalGuard`，页面的 attempt 会暂停。此时页面弹窗调用 `done` 返回 `false`，动作不执行。
 
-在顶层 guard 存在时创建新 guard，会使旧顶层尚未完成的 attempt 失效并重新布防。这样旧异步弹窗无法越过新压入的业务层。
+`modalGuard.dispose()` 后，原页面 attempt 恢复有效，业务可以继续使用之前保存的 `pageAttempt`；`pageGuard.onBack` 不会重复执行。
+
+每层 `done(action)` 只完成该层并执行该层 action。只有最后一层完成时，库才先清理哨兵再执行它的 action。

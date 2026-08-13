@@ -1,11 +1,6 @@
-export type BackAttemptSource = "history" | "cascade";
-
-export type BackGuardStatus = "armed" | "triggered" | "disposed";
-
 export interface BackAttempt {
-  readonly source: BackAttemptSource;
-  leave(): boolean;
-  reset(): boolean;
+  stay(): boolean;
+  done(action: () => void | Promise<void>): boolean;
 }
 
 export interface BackGuardOptions {
@@ -14,6 +9,5 @@ export interface BackGuardOptions {
 }
 
 export interface BackGuard {
-  readonly status: BackGuardStatus;
   dispose(): void;
 }

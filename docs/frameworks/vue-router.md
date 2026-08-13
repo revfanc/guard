@@ -1,26 +1,41 @@
-# Vue Router
+# Vue 生命周期示例
 
-在受保护路由组件挂载后创建 guard，并在卸载前销毁。VitePress 和 Vue SSR 构建期间没有 `window`，因此不要在模块顶层创建。
+这是静态生命周期示例，不是 Vue Router POP 兼容承诺。库不保证 router 与原生 `popstate` 的监听顺序；需要覆盖应用内路由跳转时，应使用 Vue Router 导航守卫。
 
 ```vue
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue"
+import { onMounted, onUnmounted, shallowRef } from "vue"
 import { createBackGuard, type BackGuard } from "@revfanc/guard"
 
-let guard: BackGuard | undefined
+const guard = shallowRef<BackGuard>()
 
 onMounted(() => {
-  guard = createBackGuard({
-    onBack({ leave, reset }) {
-      openLeaveDialog({ confirm: leave, cancel: reset })
+  guard.value = createBackGuard({
+    async onBack({ stay, done }) {
+      if (await confirmLeaving()) {
+        done(() => history.back())
+        return
+      }
+
+      stay()
     },
   })
 })
 
 onUnmounted(() => {
-  guard?.dispose()
+  guard.value?.dispose()
+  guard.value = undefined
 })
 </script>
 ```
 
-Browser history 与 hash history 均可使用。Guard 会保留 Vue Router 写入 `history.state` 的字段。通过按钮主动调用 `router.push()` 离开前，也应先执行 `guard.dispose()`。
+主动 router 导航前同步注销 guard：
+
+```ts
+function goNext() {
+  guard.value?.dispose()
+  void router.push("/next")
+}
+```
+
+创建 guard 前请确认当前 `history.state` 满足[严格输入契约](../guide/limitations#history-state-契约)。

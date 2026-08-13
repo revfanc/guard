@@ -6,18 +6,25 @@
 pnpm add @revfanc/guard
 ```
 
+包提供 ESM 与 CommonJS 入口，运行时代码兼容 ES2015，并且没有运行时依赖。
+
 ## 创建 guard
+
+在受保护页面挂载后创建 guard：
 
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
 const guard = createBackGuard({
-  onBack({ source, leave, reset }) {
-    showConfirmDialog({
-      message: source === "cascade" ? "上一层已经放行，是否继续返回？" : "确定返回？",
-      onConfirm: leave,
-      onCancel: reset,
-    })
+  async onBack({ stay, done }) {
+    const confirmed = await confirmLeaving()
+
+    if (!confirmed) {
+      stay()
+      return
+    }
+
+    done(() => history.back())
   },
   onError(error) {
     console.error("Back guard failed", error)
@@ -25,33 +32,26 @@ const guard = createBackGuard({
 })
 ```
 
-进入页面时会新增一条同 URL 历史记录。用户触发一次返回后，库立即补回保护记录，再调用 `onBack`。确认离开时调用 `leave()`；取消时调用 `reset()`。
+创建时会增加一条同 URL 哨兵记录。用户单步返回后，库恢复保护并调用 `onBack`：
 
-## 异步对话框
+- `stay()`：留在页面，之后再次返回会产生新的 attempt。
+- `done(action)`：完成这一层 guard；最后一层会先清理内部哨兵，再执行 `action`。
+
+`done` 不替业务选择去向，因此返回上一条记录要明确传入 `() => history.back()`。
+
+## 生命周期清理
 
 ```ts
-const guard = createBackGuard({
-  async onBack({ leave, reset }) {
-    const confirmed = await confirmLeaving()
-
-    if (confirmed) {
-      leave()
-      return
-    }
-
-    reset()
-  },
+onUnmounted(() => {
+  guard.dispose()
 })
 ```
 
-`leave()` 和 `reset()` 都绑定当前 attempt。旧弹窗晚到的操作会返回 `false`，不会误操作后来的 guard。
-
-## 销毁
-
-在组件卸载或主动向前导航之前销毁：
+`dispose()` 同步且幂等。它只注销 guard，不执行业务导航。主动跳转前也应先同步销毁：
 
 ```ts
 guard.dispose()
+router.push("/next")
 ```
 
-最后一个 guard 被销毁时，库会静默移除哨兵并停留在当前页面。
+框架接入只作为生命周期示例；库不保证 router POP 或 router 与原生 `popstate` 的监听顺序。详见[浏览器限制](./limitations)。

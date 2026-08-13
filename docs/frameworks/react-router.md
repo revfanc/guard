@@ -1,24 +1,47 @@
-# React Router
+# React 生命周期示例
 
-在 effect 内创建和销毁 guard：
+这是静态生命周期示例，不是 React Router POP 兼容承诺。库不保证 router 与原生 `popstate` 的监听顺序；需要覆盖应用内路由跳转时，应使用 React Router 自身的 blocker。
 
 ```tsx
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import { createBackGuard } from "@revfanc/guard"
 
 export function Editor() {
+  const guardRef = useRef<ReturnType<typeof createBackGuard>>()
+
   useEffect(() => {
     const guard = createBackGuard({
-      onBack({ leave, reset }) {
-        openLeaveDialog({ confirm: leave, cancel: reset })
+      async onBack({ stay, done }) {
+        if (await confirmLeaving()) {
+          done(() => history.back())
+          return
+        }
+
+        stay()
       },
     })
+    guardRef.current = guard
 
-    return () => guard.dispose()
+    return () => {
+      if (guardRef.current === guard) {
+        guardRef.current = undefined
+      }
+      guard.dispose()
+    }
   }, [])
 
   return <main>Editor</main>
 }
 ```
 
-BrowserRouter 与 HashRouter 均可使用。Guard 会保留 React Router 的 `idx`、`key` 和 `usr` state。通过链接或 `navigate()` 主动离开前，先销毁 guard。
+主动 router 导航前同步注销 guard：
+
+```tsx
+function goNext() {
+  guardRef.current?.dispose()
+  guardRef.current = undefined
+  navigate("/next")
+}
+```
+
+创建 guard 前请确认当前 `history.state` 满足[严格输入契约](../guide/limitations#history-state-契约)。

@@ -28,14 +28,15 @@ export default defineConfig({
         items: [
           { text: "快速开始", link: "/guide/getting-started" },
           { text: "生命周期", link: "/guide/lifecycle" },
-          { text: "嵌套 Guard", link: "/guide/nested" },
+          { text: "多层 Guard", link: "/guide/nested" },
+          { text: "工程结构与构建", link: "/guide/project-structure" },
         ],
       },
       {
-        text: "框架接入",
+        text: "框架生命周期示例",
         items: [
-          { text: "Vue Router", link: "/frameworks/vue-router" },
-          { text: "React Router", link: "/frameworks/react-router" },
+          { text: "Vue", link: "/frameworks/vue-router" },
+          { text: "React", link: "/frameworks/react-router" },
         ],
       },
       {

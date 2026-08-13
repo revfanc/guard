@@ -1,80 +1,137 @@
-import { createBackGuard, type BackAttempt, type BackGuard } from "@guard";
+import { createBackGuard, type BackAttempt } from "@guard";
 
 export function mountVanillaFixture(): void {
   const root = document.querySelector<HTMLDivElement>("#app");
   if (!root) return;
 
-  history.replaceState({ origin: true }, "", "/?fixture=vanilla&screen=origin");
+  const screen = new URLSearchParams(location.search).get("screen");
+  if (screen === "replaced") {
+    root.innerHTML = `<main><h1 data-testid="page">Replaced</h1></main>`;
+    return;
+  }
+
+  history.replaceState({ screen: "origin" }, "", "/?screen=origin");
   root.innerHTML = `
     <main>
       <h1 data-testid="page">Origin</h1>
       <button data-testid="enter">Enter protected page</button>
-      <button data-testid="add-guard" hidden>Add nested guard</button>
       <button data-testid="back" hidden>history.back()</button>
-      <button data-testid="leave" hidden>Leave</button>
-      <button data-testid="reset" hidden>Reset</button>
-      <button data-testid="dispose" hidden>Dispose</button>
-      <output data-testid="status">idle</output>
-      <output data-testid="attempts">0</output>
-      <output data-testid="history-length">${history.length}</output>
+      <button data-testid="stay" hidden>Stay</button>
+      <button data-testid="done-back" hidden>Done, then history.back()</button>
+      <button data-testid="done-replace" hidden>Done, then location.replace()</button>
+      <button data-testid="add-b" hidden>Add guard B</button>
+      <button data-testid="try-a-done" hidden>Try paused A</button>
+      <button data-testid="dispose-b" hidden>Dispose B</button>
+      <button data-testid="resume-a-done" hidden>Resume A</button>
+      <output data-testid="a-attempts">0</output>
+      <output data-testid="b-attempts">0</output>
+      <output data-testid="back-requests">0</output>
+      <output data-testid="decision">idle</output>
+      <output data-testid="actions">0</output>
     </main>`;
 
-  let guards: BackGuard[] = [];
-  const attempts: BackAttempt[] = [];
+  let guardA: ReturnType<typeof createBackGuard> | undefined;
+  let guardB: ReturnType<typeof createBackGuard> | undefined;
+  let attemptA: BackAttempt | undefined;
+  let actionCount = 0;
 
   const query = <T extends HTMLElement>(name: string) =>
     root.querySelector<T>(`[data-testid="${name}"]`)!;
 
-  const setProtectedControls = (visible: boolean) => {
-    for (const name of ["add-guard", "back", "leave", "reset", "dispose"]) {
-      query<HTMLButtonElement>(name).hidden = !visible;
+  const showProtectedControls = (): void => {
+    query<HTMLButtonElement>("enter").hidden = true;
+    for (const name of [
+      "back",
+      "stay",
+      "done-back",
+      "done-replace",
+      "add-b",
+      "try-a-done",
+      "dispose-b",
+      "resume-a-done",
+    ]) {
+      query<HTMLButtonElement>(name).hidden = false;
     }
   };
 
-  const addGuard = () => {
-    const guard = createBackGuard({
-      onBack(attempt) {
-        attempts.push(attempt);
-        query("attempts").textContent = String(attempts.length);
-        query("status").textContent = `${attempt.source}:triggered`;
-      },
-      onError(error) {
-        query("status").textContent = `error:${String(error)}`;
-      },
-    });
-    guards.push(guard);
-    query("status").textContent = `armed:${guards.length}`;
-    query("history-length").textContent = String(history.length);
+  const reportError = (error: unknown): void => {
+    query("decision").textContent = `error:${String(error)}`;
+  };
+
+  const updateActionCount = (): void => {
+    actionCount += 1;
+    query("actions").textContent = String(actionCount);
   };
 
   query("enter").addEventListener("click", () => {
-    history.pushState({ protected: true }, "", "/?fixture=vanilla&screen=protected");
+    history.pushState({ screen: "protected" }, "", "/?screen=protected");
     query("page").textContent = "Protected";
-    query<HTMLButtonElement>("enter").hidden = true;
-    setProtectedControls(true);
-    addGuard();
+    showProtectedControls();
+    guardA = createBackGuard({
+      onBack(attempt) {
+        attemptA = attempt;
+        const count = Number(query("a-attempts").textContent ?? "0") + 1;
+        query("a-attempts").textContent = String(count);
+      },
+      onError: reportError,
+    });
   });
-  query("add-guard").addEventListener("click", addGuard);
-  query("back").addEventListener("click", () => history.back());
-  query("leave").addEventListener("click", () => {
-    const attempt = attempts.at(-1);
-    query("status").textContent = `leave:${String(attempt?.leave() ?? false)}`;
-    guards = guards.filter((guard) => guard.status !== "disposed");
+
+  query("back").addEventListener("click", () => {
+    const requests = Number(query("back-requests").textContent ?? "0") + 1;
+    query("back-requests").textContent = String(requests);
+    window.setTimeout(() => history.back(), 0);
   });
-  query("reset").addEventListener("click", () => {
-    const attempt = attempts.at(-1);
-    query("status").textContent = `reset:${String(attempt?.reset() ?? false)}`;
+
+  query("stay").addEventListener("click", () => {
+    query("decision").textContent = `stay:${String(attemptA?.stay() ?? false)}`;
   });
-  query("dispose").addEventListener("click", () => {
-    guards.at(-1)?.dispose();
-    guards = guards.filter((guard) => guard.status !== "disposed");
-    query("status").textContent = `disposed:${guards.length}`;
+
+  query("done-back").addEventListener("click", () => {
+    const accepted = attemptA?.done(() => history.back()) ?? false;
+    query("decision").textContent = `done-back:${String(accepted)}`;
   });
+
+  query("done-replace").addEventListener("click", () => {
+    const accepted = attemptA?.done(() => location.replace("/?screen=replaced")) ?? false;
+    query("decision").textContent = `done-replace:${String(accepted)}`;
+  });
+
+  query("add-b").addEventListener("click", () => {
+    guardB = createBackGuard({
+      onBack() {
+        const count = Number(query("b-attempts").textContent ?? "0") + 1;
+        query("b-attempts").textContent = String(count);
+      },
+      onError: reportError,
+    });
+    query("decision").textContent = "b-added";
+  });
+
+  query("try-a-done").addEventListener("click", () => {
+    const accepted = attemptA?.done(updateActionCount) ?? false;
+    query("decision").textContent = `a-paused:${String(accepted)}`;
+  });
+
+  query("dispose-b").addEventListener("click", () => {
+    guardB?.dispose();
+    guardB = undefined;
+    query("decision").textContent = "b-disposed";
+  });
+
+  query("resume-a-done").addEventListener("click", () => {
+    const accepted = attemptA?.done(updateActionCount) ?? false;
+    query("decision").textContent = `a-resumed:${String(accepted)}`;
+  });
+
   addEventListener("popstate", () => {
     if (new URLSearchParams(location.search).get("screen") === "origin") {
       query("page").textContent = "Origin";
-      setProtectedControls(false);
-      query<HTMLButtonElement>("enter").hidden = false;
     }
+  });
+
+  addEventListener("pagehide", () => {
+    guardB?.dispose();
+    guardA?.dispose();
   });
 }

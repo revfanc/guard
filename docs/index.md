@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Guard"
   text: "让返回先停一下。"
-  tagline: 一条哨兵记录，一个明确决策。用框架无关的 TypeScript 接住浏览器返回，再由业务决定留下或离开。
+  tagline: 用一条哨兵记录接住原生单步返回，再由业务决定留下或执行离开动作。
   actions:
     - theme: brand
       text: 开始使用
@@ -13,12 +13,12 @@ hero:
       text: 查看 API
       link: /api
 features:
-  - title: 一条记录
-    details: 多个 guard 共享同一条同 URL 哨兵，不让历史栈随业务层数持续膨胀。
+  - title: 原生 History API
+    details: 聚焦同文档、单步返回，不假装成为浏览器或路由器级导航锁。
   - title: 明确决策
-    details: 返回尝试交给业务；调用 leave 放行，或调用 reset 等待下一次尝试。
-  - title: 框架无关
-    details: 零运行时依赖，兼容原生页面及 Vue Router、React Router 常见 history 模式。
+    details: 调用 stay 等待下一次返回，或用 done 提交由业务定义的最终动作。
+  - title: 小而可发布
+    details: 零运行时依赖，兼容 ES2015，同时提供 ESM、CommonJS 与类型声明。
 ---
 
 ## 最小接入
@@ -27,12 +27,17 @@ features:
 import { createBackGuard } from "@revfanc/guard"
 
 const guard = createBackGuard({
-  onBack({ leave, reset }) {
-    openConfirm({ onConfirm: leave, onCancel: reset })
+  async onBack({ stay, done }) {
+    if (await confirmLeaving()) {
+      done(() => history.back())
+      return
+    }
+
+    stay()
   },
 })
 ```
 
 ::: warning 它不是浏览器级锁定
-History API 只能处理同文档、单步返回。关闭标签页、刷新、地址栏导航、长按历史选择和跨多步跳转不在 v1 的能力范围内。
+只保证协调原生、同文档、单步返回。Router POP、关闭、刷新、地址栏、跨文档和跨多步跳转不在保证范围内。
 :::

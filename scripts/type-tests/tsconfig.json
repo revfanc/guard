@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2015",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2015", "DOM"],
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false
+  },
+  "include": ["esm.mts", "cjs.cts"]
+}
