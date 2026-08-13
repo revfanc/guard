@@ -79,11 +79,10 @@ jobs:
           node-version: 22.22.2
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - run: npm install --global npm@^11.5.1
       - run: pnpm install --frozen-lockfile
       - run: node scripts/check-version.mjs
       - run: pnpm build
       - run: pnpm pack:check
-      - run: npm publish --access public
+      - run: pnpm dlx npm@11.6.2 publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
