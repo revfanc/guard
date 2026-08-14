@@ -1,6 +1,6 @@
 {
   "name": "@revfanc/guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A small, framework-agnostic browser back guard.",
   "type": "module",
   "main": "./dist/index.cjs",

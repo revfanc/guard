@@ -11,13 +11,13 @@ export function Editor() {
 
   useEffect(() => {
     const guard = createBackGuard({
-      async onBack({ stay, done }) {
+      async onBack(attempt) {
         if (await confirmLeaving()) {
-          done(() => history.back())
+          attempt.resolve(() => history.back())
           return
         }
 
-        stay()
+        attempt.resolve()
       },
     })
     guardRef.current = guard
@@ -26,7 +26,7 @@ export function Editor() {
       if (guardRef.current === guard) {
         guardRef.current = undefined
       }
-      guard.dispose()
+      guard.resolve()
     }
   }, [])
 
@@ -34,14 +34,28 @@ export function Editor() {
 }
 ```
 
-主动 router 导航前同步注销 guard：
+Effect cleanup 使用无 action 的 `resolve()`。最后一层的静默 cleanup 尚未完成时，Strict Mode 的快速重挂载或新的 `createBackGuard()` 会排队。
+
+主动 router 导航则把 navigation 放进 actionful overload，不能先静默 resolve 再单独 navigate：
 
 ```tsx
 function goNext() {
-  guardRef.current?.dispose()
-  guardRef.current = undefined
-  navigate("/next")
+  const guard = guardRef.current
+
+  if (!guard) {
+    navigate("/next")
+    return
+  }
+
+  guard.resolve(() => {
+    if (guardRef.current === guard) {
+      guardRef.current = undefined
+    }
+    navigate("/next")
+  })
 }
 ```
 
-创建 guard 前请确认当前 `history.state` 满足[严格输入契约](../guide/limitations#history-state-契约)。
+Actionful resolve 只允许栈顶 guard。返回 `false` 时 navigation action 不会执行。
+
+这个模式只协调本库 sentinel 与主动 navigation。它不保证 React Router POP、blocker 顺序或 router 与原生 `popstate` 监听器的先后。创建 guard 前请确认当前 `history.state` 满足[严格输入契约](../guide/limitations#history-state-契约)。

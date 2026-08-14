@@ -1,13 +1,21 @@
-export interface BackAttempt {
-  stay(): boolean;
-  done(action: () => void | Promise<void>): boolean;
+export type BackAction = () => void | PromiseLike<unknown>;
+
+export interface BackResolution {
+  /** Resolves without scheduling an action. */
+  resolve(): boolean;
+
+  /** Resolves and runs the action when the runtime can do so safely. */
+  resolve(action: BackAction): boolean;
 }
+
+export type BackAttempt = BackResolution;
+
+export type BackGuard = BackResolution;
 
 export interface BackGuardOptions {
-  onBack(attempt: BackAttempt): void | Promise<void>;
-  onError?(error: unknown): void;
-}
+  /** Must resolve each attempt explicitly. */
+  onBack(attempt: BackAttempt): void | PromiseLike<void>;
 
-export interface BackGuard {
-  dispose(): void;
+  /** Receives callback, action, and internal History API failures. */
+  onError?(error: unknown): void;
 }

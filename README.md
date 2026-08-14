@@ -15,30 +15,44 @@ pnpm add @revfanc/guard
 import { createBackGuard } from "@revfanc/guard"
 
 const guard = createBackGuard({
-  async onBack({ stay, done }) {
+  async onBack(attempt) {
     const confirmed = await confirmLeaving()
 
     if (!confirmed) {
-      stay()
+      attempt.resolve()
       return
     }
 
-    done(() => history.back())
+    attempt.resolve(() => history.back())
   },
   onError(error) {
     console.error("Back guard failed", error)
   },
 })
 
-// Component cleanup is synchronous.
-guard.dispose()
+// Resolve this guard without a navigation action during component cleanup.
+guard.resolve()
 ```
 
+If `onError` is omitted, reported failures may reach the browser's global
+`error` or `unhandledrejection` channel.
+
 The library adds one same-URL sentinel entry. A single-step back returns to the
-protected entry, restores the sentinel, and calls `onBack` once. `stay()` arms
-the guard for a later attempt. `done(action)` completes the current guard; when
-it is the last guard, `action` runs only after the internal sentinel traversal
-has completed. The library does not choose the final navigation for you.
+protected entry, restores the sentinel, and calls `onBack` once. Attempts and
+guards share one verb: `resolve()`. Without an action it settles silently;
+with an action it commits the guard and runs that action when it is safe. For an
+attempt, silent resolution means staying and arming the same guard again. For a
+guard, it means ending that guard's lifecycle.
+
+Both overloads return whether the transition was accepted. The first accepted
+resolution wins; later calls return `false`, and an action is never run more
+than once. A final actionful resolution first returns from the sentinel to the
+protected base entry, then runs the action. The library does not choose the
+final navigation for you:
+
+```ts
+guard.resolve(() => router.push("/next"))
+```
 
 ## Scope
 
@@ -46,14 +60,15 @@ Supported:
 
 - native, same-document `history.back()` and `history.go(-1)` attempts;
 - asynchronous decisions without duplicate `onBack` calls;
-- LIFO guards, with a paused attempt resuming after the guard above it is disposed;
-- synchronous, idempotent disposal.
+- LIFO guards, with a paused attempt resuming after the guard above it resolves;
+- silent resolution of any guard layer, and actionful resolution of the top layer;
+- queued teardown/recreation while a silent sentinel cleanup is in progress; the replacement becomes active only after the cleanup reaches its base.
 
 Not guaranteed:
 
 - router POP behavior or listener ordering in Vue Router, React Router, or other routers;
 - reload, tab close, address-bar and cross-document navigation;
-- long-press history selection, `history.go(-N)`, or queued rapid back requests;
+- long-press history selection, `history.go(-N)`, or queued rapid back requests, including the not-yet-active recreate window;
 - forward navigation or external `pushState` / `replaceState` while a guard is active.
 
 See the [browser and state boundaries](https://revfanc.github.io/guard/guide/limitations).

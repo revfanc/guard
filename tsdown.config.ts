@@ -8,8 +8,9 @@ export default defineConfig({
   dts: {
     sourcemap: false,
   },
-  sourcemap: true,
+  sourcemap: "hidden",
   clean: true,
+  minify: true,
   treeshake: true,
   failOnWarn: true,
   tsconfig: "tsconfig.build.json",

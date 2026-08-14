@@ -1,347 +1,298 @@
-import {
-  assertSupportedState,
-  clearCurrentSentinel,
-  isOwnSentinel,
-  pushSentinel,
-} from "./history-state";
-import type { BackAttempt, BackGuard, BackGuardOptions } from "./types";
+import { createHistoryPort, type HistoryPort, type Sentinel } from "./history";
+import type {
+  BackAction,
+  BackAttempt,
+  BackGuard,
+  BackGuardOptions,
+  BackResolution,
+} from "./types";
 
-const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime");
+const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime.v2");
+const SENTINEL_REPLACED =
+  "@revfanc/guard: the history sentinel was replaced.";
+const ACTION_COMMITTED =
+  "@revfanc/guard: a navigation action is already being committed.";
+const INVALID_RESOLVE =
+  "@revfanc/guard: resolve() accepts no arguments or one action function.";
 
-type RuntimePhase = "idle" | "active" | "cleaning";
-type GuardState = "armed" | "prompting" | "disposed";
-
-interface GuardRecord {
-  readonly options: BackGuardOptions;
-  state: GuardState;
-  token?: object;
-}
-
-type RuntimeWindow = Window & {
-  [RUNTIME_SYMBOL]?: GuardRuntime;
+type Result = BackAction | null;
+type Layer = {
+  options: BackGuardOptions;
+  attempt?: BackAttempt;
 };
+type Anchored = { phase: "anchored"; sentinel: Sentinel; layers: Layer[] };
+type Traversing = {
+  phase: "traversing";
+  sentinel: Sentinel;
+  owner: Layer;
+  restart: Layer[];
+  action: Result;
+};
+type State = { phase: "idle" } | Anchored | Traversing;
+type RuntimeWindow = Window & { [RUNTIME_SYMBOL]?: WindowCoordinator };
 
-function createId(): string {
-  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-}
-
-function reportError(
-  target: Window,
-  record: GuardRecord | undefined,
-  error: unknown,
-): void {
-  if (record?.options.onError) {
-    try {
-      record.options.onError(error);
-      return;
-    } catch (onErrorFailure) {
-      error = onErrorFailure;
+function handle(apply: (result: Result) => boolean): BackResolution {
+  function resolve(): boolean;
+  function resolve(action: BackAction): boolean;
+  function resolve(action?: BackAction): boolean {
+    if (arguments.length === 0) return apply(null);
+    if (arguments.length !== 1 || typeof action !== "function") {
+      throw new TypeError(INVALID_RESOLVE);
     }
+    return apply(action);
   }
-
-  const reporter = (target as Window & { reportError?: (value: unknown) => void })
-    .reportError;
-  if (typeof reporter === "function") {
-    reporter.call(target, error);
-    return;
-  }
-
-  void Promise.resolve().then(() => {
-    throw error;
-  });
+  return { resolve };
 }
 
-class GuardRuntime {
-  private readonly target: RuntimeWindow;
-  private readonly guards: GuardRecord[] = [];
-  private phase: RuntimePhase = "idle";
-  private sentinelId?: string;
-  private currentIsSentinel = false;
-  private cleanupAction?: () => void | Promise<void>;
-  private cleanupRecord?: GuardRecord;
+function invoke(
+  operation: () => void | PromiseLike<unknown>,
+  fail: (error: unknown) => void,
+): void {
+  try {
+    const result = operation();
+    if (result && typeof result.then === "function") {
+      Promise.resolve(result).then(undefined, fail);
+    }
+  } catch (error) {
+    fail(error);
+  }
+}
 
-  constructor(target: RuntimeWindow) {
-    this.target = target;
-    target.addEventListener("popstate", (event) => this.handlePopState(event), true);
+export class WindowCoordinator {
+  private state: State = { phase: "idle" };
+
+  constructor(private readonly history: HistoryPort) {
+    history.listen((state, intercept) => this.onChange(state, intercept));
   }
 
   add(options: BackGuardOptions): BackGuard {
-    if (this.phase === "cleaning") {
-      throw new Error("@revfanc/guard: the final guard is being completed.");
-    }
+    const layer: Layer = { options };
+    const state = this.state;
 
-    if (this.guards.length === 0) {
-      this.activate();
-    } else if (!this.ownsCurrentSentinel()) {
-      const error = new Error("@revfanc/guard: the history sentinel was replaced.");
-      this.stop(error, this.top());
-      throw error;
-    }
-
-    const record: GuardRecord = { options, state: "armed" };
-    this.guards.push(record);
-    return { dispose: (): void => this.dispose(record) };
-  }
-
-  private activate(): void {
-    const state: unknown = this.target.history.state;
-    assertSupportedState(state);
-    this.sentinelId = createId();
-    pushSentinel(
-      this.target,
-      state,
-      this.sentinelId,
-      this.target.location.href,
-    );
-    this.currentIsSentinel = true;
-    this.phase = "active";
-  }
-
-  private top(): GuardRecord | undefined {
-    return this.guards.length > 0
-      ? this.guards[this.guards.length - 1]
-      : undefined;
-  }
-
-  private ownsCurrentSentinel(): boolean {
-    return this.currentIsSentinel &&
-      this.sentinelId !== undefined &&
-      isOwnSentinel(this.target.history.state, this.sentinelId);
-  }
-
-  private handlePopState(event: PopStateEvent): void {
-    const id = this.sentinelId;
-    if (this.phase === "idle") {
-      if (id && isOwnSentinel(event.state, id)) {
-        try {
-          clearCurrentSentinel(this.target, id);
-        } catch (error) {
-          reportError(this.target, undefined, error);
-        }
+    if (state.phase === "idle") {
+      this.anchor([layer]);
+    } else if (state.phase === "anchored") {
+      if (!this.owns(state)) {
+        throw new Error(SENTINEL_REPLACED);
       }
-      return;
+      state.layers.push(layer);
+    } else if (state.action) {
+      throw new Error(ACTION_COMMITTED);
+    } else {
+      state.restart.push(layer);
     }
-
-    if (this.phase === "cleaning") {
-      this.finishCleanup(event);
-      return;
-    }
-
-    if (!id) {
-      return;
-    }
-    if (isOwnSentinel(event.state, id)) {
-      this.currentIsSentinel = true;
-      return;
-    }
-    if (!this.currentIsSentinel) {
-      return;
-    }
-
-    event.stopImmediatePropagation();
-    this.currentIsSentinel = false;
-
-    try {
-      pushSentinel(this.target, event.state, id, this.target.location.href);
-      this.currentIsSentinel = true;
-    } catch (error) {
-      this.stop(error, this.top());
-      return;
-    }
-
-    const top = this.top();
-    if (top?.state === "armed") {
-      this.dispatch(top);
-    }
+    return handle((result) => this.resolveGuard(layer, result));
   }
 
-  private dispatch(record: GuardRecord): void {
-    const token = {};
-    record.state = "prompting";
-    record.token = token;
-
-    const attempt: BackAttempt = {
-      stay: (): boolean => this.stay(record, token),
-      done: (action): boolean => this.done(record, token, action),
+  private anchor(layers: Layer[]): void {
+    this.state = {
+      phase: "anchored",
+      sentinel: this.history.createSentinel(),
+      layers,
     };
+  }
 
-    try {
-      const result = record.options.onBack(attempt);
-      if (result && typeof result.then === "function") {
-        Promise.resolve(result).then(undefined, (error: unknown) => {
-          this.recoverFailedAttempt(record, token, error);
-        });
-      }
-    } catch (error) {
-      this.recoverFailedAttempt(record, token, error);
+  private top(layers: Layer[]): Layer | undefined {
+    return layers[layers.length - 1];
+  }
+
+  private onChange(eventState: unknown, intercept: () => void): void {
+    const current = this.state;
+    if (current.phase === "anchored") {
+      this.onBack(current, eventState, intercept);
+    } else if (current.phase === "traversing") {
+      this.onTraversed(current, eventState, intercept);
     }
   }
 
-  private recoverFailedAttempt(
-    record: GuardRecord,
-    token: object,
-    error: unknown,
+  private onBack(
+    state: Anchored,
+    eventState: unknown,
+    intercept: () => void,
   ): void {
-    if (record.state === "prompting" && record.token === token) {
-      record.state = "armed";
-      record.token = undefined;
-    }
-    reportError(this.target, record, error);
-  }
-
-  private isCurrentAttempt(record: GuardRecord, token: object): boolean {
-    return this.phase === "active" &&
-      this.top() === record &&
-      record.state === "prompting" &&
-      record.token === token;
-  }
-
-  private stay(record: GuardRecord, token: object): boolean {
-    if (!this.isCurrentAttempt(record, token)) {
-      return false;
-    }
-    record.state = "armed";
-    record.token = undefined;
-    return true;
-  }
-
-  private done(
-    record: GuardRecord,
-    token: object,
-    action: () => void | Promise<void>,
-  ): boolean {
-    if (typeof action !== "function") {
-      throw new TypeError("@revfanc/guard: done() requires an action function.");
-    }
-    if (!this.isCurrentAttempt(record, token)) {
-      return false;
-    }
-
-    if (this.guards.length > 1) {
-      this.remove(record);
-      this.runAction(record, action);
-      return true;
-    }
-    if (!this.ownsCurrentSentinel()) {
-      const error = new Error("@revfanc/guard: the history sentinel was replaced.");
-      this.stop(error, record);
-      return false;
-    }
-
-    this.remove(record);
-    this.phase = "cleaning";
-    this.cleanupAction = action;
-    this.cleanupRecord = record;
-    try {
-      this.target.history.back();
-    } catch (error) {
-      this.cancelCleanup(error);
-    }
-    return true;
-  }
-
-  private finishCleanup(event: PopStateEvent): void {
-    const id = this.sentinelId;
-    if (!id || isOwnSentinel(event.state, id)) {
-      this.cancelCleanup(
-        new Error("@revfanc/guard: the sentinel cleanup did not reach its base."),
+    if (state.sentinel.matches(eventState)) return;
+    if (!state.sentinel.isAtBase(eventState)) {
+      this.fail(
+        state.layers,
+        new Error("@revfanc/guard: back navigation missed the guarded base."),
       );
       return;
     }
 
-    event.stopImmediatePropagation();
-    this.currentIsSentinel = false;
-    const action = this.cleanupAction;
-    const record = this.cleanupRecord;
-    this.cleanupAction = undefined;
-    this.cleanupRecord = undefined;
-    this.phase = "idle";
-    if (action && record) {
-      this.runAction(record, action);
+    intercept();
+    try {
+      state.sentinel.restore(eventState);
+    } catch (error) {
+      this.fail(state.layers, error);
+      return;
     }
+
+    const layer = this.top(state.layers);
+    if (layer && !layer.attempt) this.dispatch(layer);
   }
 
-  private cancelCleanup(error: unknown): void {
-    const record = this.cleanupRecord;
-    this.cleanupAction = undefined;
-    this.cleanupRecord = undefined;
-    this.currentIsSentinel = false;
-    this.phase = "idle";
-    reportError(this.target, record, error);
-  }
-
-  private runAction(
-    record: GuardRecord,
-    action: () => void | Promise<void>,
+  private onTraversed(
+    state: Traversing,
+    eventState: unknown,
+    intercept: () => void,
   ): void {
-    try {
-      const result = action();
-      if (result && typeof result.then === "function") {
-        Promise.resolve(result).then(undefined, (error: unknown) => {
-          reportError(this.target, record, error);
-        });
-      }
-    } catch (error) {
-      reportError(this.target, record, error);
-    }
-  }
-
-  private dispose(record: GuardRecord): void {
-    if (record.state === "disposed") {
-      return;
-    }
-    this.remove(record);
-    if (this.guards.length > 0 || this.phase !== "active") {
+    if (!state.sentinel.isAtBase(eventState)) {
+      this.fail(
+        state.restart,
+        new Error("@revfanc/guard: sentinel cleanup missed its base."),
+        this.top(state.restart) ?? state.owner,
+      );
       return;
     }
 
-    const id = this.sentinelId;
+    intercept();
+    if (state.action) {
+      this.state = { phase: "idle" };
+      this.run(state.owner, state.action);
+    } else if (state.restart.length === 0) {
+      this.state = { phase: "idle" };
+    } else {
+      try {
+        this.anchor(state.restart);
+      } catch (error) {
+        this.fail(state.restart, error, this.top(state.restart) ?? state.owner);
+      }
+    }
+  }
+
+  private dispatch(layer: Layer): void {
+    const attempt: BackAttempt = handle((result) =>
+      this.resolveAttempt(layer, attempt, result),
+    );
+    layer.attempt = attempt;
+    invoke(
+      () => layer.options.onBack(attempt),
+      (error) => {
+        if (layer.attempt === attempt) layer.attempt = undefined;
+        this.report(layer, error);
+      },
+    );
+  }
+
+  private resolveAttempt(
+    layer: Layer,
+    attempt: BackAttempt,
+    result: Result,
+  ): boolean {
+    const state = this.state;
+    if (
+      state.phase !== "anchored" ||
+      this.top(state.layers) !== layer ||
+      layer.attempt !== attempt ||
+      !this.owns(state, layer)
+    ) {
+      return false;
+    }
+
+    if (!result) {
+      layer.attempt = undefined;
+      return true;
+    }
+    return this.finishLayer(state, layer, state.layers.length - 1, result);
+  }
+
+  private resolveGuard(layer: Layer, result: Result): boolean {
+    const state = this.state;
+
+    if (state.phase === "traversing") {
+      const index = state.restart.indexOf(layer);
+      if (state.action || result || index < 0) return false;
+      layer.attempt = undefined;
+      state.restart.splice(index, 1);
+      return true;
+    }
+    if (state.phase !== "anchored") return false;
+
+    const index = state.layers.indexOf(layer);
+    if (index < 0 || !this.owns(state, layer)) return false;
+    if (result && this.top(state.layers) !== layer) return false;
+    return this.finishLayer(state, layer, index, result);
+  }
+
+  private finishLayer(
+    state: Anchored,
+    layer: Layer,
+    index: number,
+    result: Result,
+  ): boolean {
+    if (state.layers.length === 1) {
+      return this.final(state, layer, result);
+    }
+    layer.attempt = undefined;
+    state.layers.splice(index, 1);
+    if (result) this.run(layer, result);
+    return true;
+  }
+
+  private final(
+    state: Anchored,
+    layer: Layer,
+    result: Result,
+  ): boolean {
+    this.state = {
+      phase: "traversing",
+      sentinel: state.sentinel,
+      owner: layer,
+      restart: [],
+      action: result,
+    };
     try {
-      if (!id || !this.ownsCurrentSentinel()) {
-        throw new Error("@revfanc/guard: the history sentinel was replaced.");
-      }
-      clearCurrentSentinel(this.target, id);
+      state.sentinel.release();
     } catch (error) {
-      reportError(this.target, record, error);
-    } finally {
-      this.currentIsSentinel = false;
-      this.phase = "idle";
-    }
-  }
-
-  private remove(record: GuardRecord): void {
-    const index = this.guards.indexOf(record);
-    if (index >= 0) {
-      this.guards.splice(index, 1);
-    }
-    record.token = undefined;
-    record.state = "disposed";
-  }
-
-  private stop(error: unknown, record: GuardRecord | undefined): void {
-    for (let index = 0; index < this.guards.length; index += 1) {
-      const guard = this.guards[index];
-      if (guard) {
-        guard.state = "disposed";
-        guard.token = undefined;
+      if (state.sentinel.isCurrent()) {
+        this.state = state;
+        this.report(layer, error);
+      } else {
+        this.fail(state.layers, error, layer);
       }
+      return false;
     }
-    this.guards.length = 0;
-    this.currentIsSentinel = false;
-    this.phase = "idle";
-    reportError(this.target, record, error);
+
+    layer.attempt = undefined;
+    return true;
+  }
+
+  private owns(
+    state: Anchored,
+    reporter: Layer | undefined = this.top(state.layers),
+  ): boolean {
+    if (state.sentinel.isCurrent()) return true;
+    this.fail(state.layers, new Error(SENTINEL_REPLACED), reporter);
+    return false;
+  }
+
+  private fail(
+    layers: Layer[],
+    error: unknown,
+    reporter: Layer | undefined = this.top(layers),
+  ): void {
+    for (const layer of layers) layer.attempt = undefined;
+    this.state = { phase: "idle" };
+    this.report(reporter, error);
+  }
+
+  private run(layer: Layer, action: BackAction): void {
+    invoke(action, (error) => this.report(layer, error));
+  }
+
+  private report(layer: Layer | undefined, error: unknown): void {
+    if (!layer?.options.onError) return this.history.report(error);
+    try {
+      layer.options.onError(error);
+    } catch (failure) {
+      this.history.report(failure);
+    }
   }
 }
 
-export function createGuard(
-  target: Window,
-  options: BackGuardOptions,
-): BackGuard {
+export function createGuard(target: Window, options: BackGuardOptions): BackGuard {
   const runtimeTarget = target as RuntimeWindow;
-  let runtime = runtimeTarget[RUNTIME_SYMBOL];
-  if (!runtime) {
-    runtime = new GuardRuntime(runtimeTarget);
-    runtimeTarget[RUNTIME_SYMBOL] = runtime;
-  }
-  return runtime.add(options);
+  return (runtimeTarget[RUNTIME_SYMBOL] ||= new WindowCoordinator(
+    createHistoryPort(target),
+  )).add(options);
 }

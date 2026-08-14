@@ -1,27 +1,29 @@
 import {
   createBackGuard,
-  isBackGuardSupported,
+  type BackAction,
   type BackAttempt,
   type BackGuard,
+  type BackGuardOptions,
+  type BackResolution,
 } from "@revfanc/guard";
 
-function stay(attempt: BackAttempt): boolean {
-  return attempt.stay();
+const action: BackAction = () => Promise.resolve("navigated");
+function checkAttempt(attempt: BackAttempt): void {
+  const results: boolean[] = [attempt.resolve(), attempt.resolve(action)];
+  void results;
 }
+const options: BackGuardOptions = { onBack: checkAttempt };
+const resolution: BackResolution = createBackGuard(options);
+const guard: BackGuard = resolution;
+const results: boolean[] = [resolution.resolve(), guard.resolve(action)];
 
-function done(attempt: BackAttempt): boolean {
-  return attempt.done(() => undefined);
-}
+// @ts-expect-error resolve(undefined) must not become silent resolution.
+resolution.resolve(undefined);
+// @ts-expect-error legacy methods must not return to the public contract.
+resolution.stay();
+// @ts-expect-error legacy methods must not return to the public contract.
+resolution.done();
+// @ts-expect-error lifecycle cleanup is expressed by resolve().
+guard.dispose();
 
-const guard: BackGuard = createBackGuard({
-  onBack(attempt: BackAttempt) {
-    stay(attempt);
-  },
-});
-
-const supported: boolean = isBackGuardSupported();
-const disposed: void = guard.dispose();
-
-void supported;
-void disposed;
-void done;
+void results;

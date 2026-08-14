@@ -1,20 +1,13 @@
 import { createGuard } from "./runtime";
 import type { BackGuard, BackGuardOptions } from "./types";
 
-export type { BackAttempt, BackGuard, BackGuardOptions } from "./types";
-
-function browserWindow(): Window | undefined {
-  return typeof window === "undefined" ? undefined : window;
-}
-
-export function isBackGuardSupported(): boolean {
-  const target = browserWindow();
-  return !!target &&
-    typeof target.addEventListener === "function" &&
-    typeof target.history?.pushState === "function" &&
-    typeof target.history.replaceState === "function" &&
-    typeof target.history.back === "function";
-}
+export type {
+  BackAction,
+  BackAttempt,
+  BackGuard,
+  BackGuardOptions,
+  BackResolution,
+} from "./types";
 
 export function createBackGuard(options: BackGuardOptions): BackGuard {
   if (!options || typeof options.onBack !== "function") {
@@ -24,8 +17,14 @@ export function createBackGuard(options: BackGuardOptions): BackGuard {
     throw new TypeError("@revfanc/guard: options.onError must be a function.");
   }
 
-  const target = browserWindow();
-  if (!target || !isBackGuardSupported()) {
+  const target = typeof window === "undefined" ? undefined : window;
+  if (
+    !target ||
+    typeof target.addEventListener !== "function" ||
+    typeof target.history?.pushState !== "function" ||
+    typeof target.history.replaceState !== "function" ||
+    typeof target.history.back !== "function"
+  ) {
     throw new Error(
       "@revfanc/guard: createBackGuard() requires a browser with the History API.",
     );

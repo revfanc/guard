@@ -18,8 +18,8 @@ guard/
 ├─ src/
 │  ├─ index.ts             # 唯一公开入口与导出
 │  ├─ types.ts             # 稳定的公开类型
-│  ├─ history-state.ts     # 哨兵 state 校验与标记
-│  └─ runtime.ts           # guard 栈与单步遍历协调
+│  ├─ history.ts           # 哨兵能力与全部 History API 副作用
+│  └─ runtime.ts           # resolve、LIFO 与三阶段状态转换
 ├─ tests/
 │  ├─ unit/                # 快速、确定性的边界与异常测试
 │  └─ e2e/
@@ -36,6 +36,8 @@ guard/
 ```
 
 实现文件可以继续按复杂度拆分，但只有 `src/index.ts` 是包的公开边界。内部模块不应成为隐式 deep import 契约。
+
+运行时应把统一的 `resolve()` / `resolve(action)` 作为公开命令，内部集中处理 `idle`、`anchored`、`traversing` 三个阶段；`traversing` 再用 `restart` 与 `action` 区分静默重建和不可撤销提交。不要把阶段布尔值、History 副作用或额外的导航方法扩散到公开 API。
 
 ## 发布约束
 
