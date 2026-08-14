@@ -1,52 +1,45 @@
 # 多层 Guard
 
-多个 guard 按后创建优先（LIFO）工作，但不会自动向下传递，也不会替其他层作决定。
+多个 Guard 按后创建优先（LIFO）工作。一次 Back 只交给当前栈顶，不会替其他层作决定。
 
 ```ts
 let pageAttempt: BackAttempt | undefined
 
-const pageGuard = createBackGuard({
-  onBack(attempt) {
-    pageAttempt = attempt
-    showPageExitDialog()
-  },
+const pageGuard = createBackGuard((attempt) => {
+  pageAttempt = attempt
+  return showPageExitDialog().then((confirmed) => {
+    if (confirmed) attempt.allow()
+  })
 })
 
-const modalGuard = createBackGuard({
-  onBack(attempt) {
-    showModalDialog({
-      cancel: () => attempt.resolve(),
-      confirm: () => attempt.resolve(closeModal),
-    })
-  },
+const modalGuard = createBackGuard((attempt) => {
+  return showModalDialog().then((close) => {
+    if (close) {
+      closeModal()
+      attempt.allow()
+    }
+  })
 })
 ```
 
-## Attempt 暂停与恢复
+## Attempt 暂停
 
-若 `pageGuard` 已经收到 attempt，随后又创建 `modalGuard`，页面 attempt 会暂停。暂停期间调用 `pageAttempt.resolve(...)` 返回 `false`，不改变状态，也不执行 action。
+如果 `pageGuard` 已有 pending attempt，随后创建 `modalGuard`，页面 attempt 会暂停。暂停期间 `pageAttempt.allow()` 返回 `false`。
 
-`modalGuard.resolve()` 后，原页面 attempt 恢复有效，业务可以继续使用之前保存的 `pageAttempt`；`pageGuard.onBack` 不会重复执行。
+上层 Guard 被 dispose 后，只要页面 handler 的 Promise 仍 pending，原 attempt 就能恢复；如果 Promise 已完成，原 attempt 已失效，下一次 Back 会重新调用页面 handler。
 
-## 静默解决可以跨层
+## `allow()` 只完成栈顶层
 
-不带 action 的 `guard.resolve()` 只是生命周期结束，因此可以移除任意一层：
+非最后一层调用 `allow()` 时，只移除该逻辑层并消费本次 Back，不会继续物理 Back，也不会触发下层 handler。弹窗关闭等局部业务动作应在 `allow()` 前执行。
 
-```ts
-pageGuard.resolve()
-```
+只有最后一层 `allow()` 才会清理 sentinel 并自动继续原始 Back。
 
-即使 `pageGuard` 上方仍有 modal，这个调用也可以成功。它不会替 modal 作决定，也不会执行导航。之后 modal 仍然是栈顶。
+## `dispose()` 可以跨层
 
-## 带 action 只能解决栈顶
-
-带 action 的 Guard 解决会执行该层业务动作，必须遵守 LIFO：
+`dispose()` 是生命周期操作，可以移除任意层：
 
 ```ts
-modalGuard.resolve(closeModal) // modal 是栈顶时可以被接受
-pageGuard.resolve(goToNext)    // modal 仍在上方时返回 false
+await pageGuard.dispose()
 ```
 
-只有返回 `true` 的 actionful resolve 才会执行 action。因非栈顶或尚未激活而返回 `false` 时不会消耗 guard，可以在它成为栈顶并激活后重试；如果原因是 sentinel 丢失或 History 回滚失败，runtime 会 fail-closed，该句柄不会恢复。
-
-Attempt 本身也只在所属 guard 位于栈顶且 attempt 仍有效时才能解决。每层 `attempt.resolve(action)` 只完成该层并执行该层 action，不会自动触发下层 `onBack`。只有最后一层完成时，库才先从 sentinel 回到受保护 base，再执行它的 action。
+即使它上方仍有 modal，这个调用也不会替 modal 作决定或触发导航。最后剩下的一层被 dispose 时才需要等待 sentinel cleanup。

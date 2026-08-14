@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  HistoryPort,
-  Sentinel,
-} from "../../src/history";
+import type { HistoryPort, Sentinel } from "../../src/history";
 import { WindowCoordinator } from "../../src/runtime";
-import type { BackAttempt, BackGuard } from "../../src/types";
+import type { BackAttempt } from "../../src/types";
 
 const BASE_STATE = Symbol("base");
 const SENTINEL_STATE = Symbol("sentinel");
@@ -16,23 +13,15 @@ class FakeSentinel implements Sentinel {
   restoreFailure: unknown;
   releaseFailure: unknown;
   readonly restore = vi.fn((state: unknown): void => {
-    if (this.restoreFailure) {
-      throw this.restoreFailure;
-    }
-    if (!this.isAtBase(state)) {
-      throw new Error("not at base");
-    }
+    if (this.restoreFailure) throw this.restoreFailure;
+    if (!this.isAtBase(state)) throw new Error("not at base");
     this.current = true;
   });
   readonly release = vi.fn((): void => {
-    if (!this.current) {
-      throw new Error("sentinel was replaced");
-    }
+    if (!this.current) throw new Error("sentinel was replaced");
     this.current = false;
     if (this.releaseFailure) {
-      if (this.rollbackSucceeds) {
-        this.current = true;
-      }
+      if (this.rollbackSucceeds) this.current = true;
       throw this.releaseFailure;
     }
   });
@@ -53,13 +42,15 @@ class FakeSentinel implements Sentinel {
 class FakeHistory implements HistoryPort {
   readonly sentinels: FakeSentinel[] = [];
   readonly report = vi.fn();
+  readonly back = vi.fn(() => {
+    if (this.backFailure) throw this.backFailure;
+  });
   createFailure: unknown;
+  backFailure: unknown;
   private listener?: (state: unknown, intercept: () => void) => void;
 
   createSentinel(): Sentinel {
-    if (this.createFailure) {
-      throw this.createFailure;
-    }
+    if (this.createFailure) throw this.createFailure;
     const sentinel = new FakeSentinel();
     this.sentinels.push(sentinel);
     return sentinel;
@@ -72,9 +63,7 @@ class FakeHistory implements HistoryPort {
   emit(state: unknown): ReturnType<typeof vi.fn> {
     const intercept = vi.fn();
     const sentinel = this.sentinels[this.sentinels.length - 1];
-    if (sentinel) {
-      sentinel.current = state === SENTINEL_STATE;
-    }
+    if (sentinel) sentinel.current = state === SENTINEL_STATE;
     this.listener?.(state, intercept);
     return intercept;
   }
@@ -82,6 +71,20 @@ class FakeHistory implements HistoryPort {
   emitBase(): ReturnType<typeof vi.fn> {
     return this.emit(BASE_STATE);
   }
+}
+
+function deferred(): {
+  promise: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
 }
 
 let history: FakeHistory;
@@ -99,266 +102,321 @@ beforeEach(() => {
 });
 
 describe("WindowCoordinator", () => {
-  it("shares one sentinel and coalesces Back while an attempt is pending", () => {
+  it("shares one sentinel and re-arms after a handler settles without allow", () => {
     const firstBack = vi.fn();
-    const secondAttempts: BackAttempt[] = [];
-    runtime.add({ onBack: firstBack });
-    const second = runtime.add({
-      onBack(attempt) {
-        secondAttempts.push(attempt);
-      },
-    });
+    const secondBack = vi.fn();
+    const first = runtime.add(firstBack);
+    const second = runtime.add(secondBack);
 
     expect(history.sentinels).toHaveLength(1);
     expect(history.emitBase()).toHaveBeenCalledOnce();
     history.emitBase();
-    expect(secondAttempts).toHaveLength(1);
+    expect(secondBack).toHaveBeenCalledTimes(2);
     expect(firstBack).not.toHaveBeenCalled();
 
-    expect(secondAttempts[0]?.resolve()).toBe(true);
-    expect(secondAttempts[0]?.resolve()).toBe(false);
+    void second.dispose();
+    const disposed = first.dispose();
     history.emitBase();
-    expect(secondAttempts).toHaveLength(2);
-    expect(second.resolve()).toBe(true);
+    return disposed;
   });
 
-  it("keeps a lower attempt pending while a higher layer owns resolution", () => {
-    let outerAttempt: BackAttempt | undefined;
-    const outerBack = vi.fn((attempt: BackAttempt) => {
-      outerAttempt = attempt;
-    });
-    const outer = runtime.add({ onBack: outerBack });
-    history.emitBase();
-
-    let innerAttempt: BackAttempt | undefined;
-    const inner = runtime.add({
-      onBack(attempt) {
-        innerAttempt = attempt;
-      },
-    });
-    history.emitBase();
-
-    const action = vi.fn();
-    expect(outerAttempt?.resolve(action)).toBe(false);
-    expect(action).not.toHaveBeenCalled();
-    expect(innerAttempt).toBeDefined();
-
-    expect(inner.resolve()).toBe(true);
-    expect(outerAttempt?.resolve()).toBe(true);
-    expect(outerBack).toHaveBeenCalledOnce();
-    expect(outer.resolve()).toBe(true);
-  });
-
-  it("consumes only the top layer and runs its action after committing state", () => {
-    let outerAttempt: BackAttempt | undefined;
-    const outer = runtime.add({
-      onBack(attempt) {
-        outerAttempt = attempt;
-      },
-    });
-    history.emitBase();
-
-    let innerAttempt: BackAttempt | undefined;
-    const inner = runtime.add({
-      onBack(attempt) {
-        innerAttempt = attempt;
-      },
-    });
-    history.emitBase();
-
-    const action = vi.fn(() => {
-      expect(inner.resolve()).toBe(false);
-      expect(outerAttempt?.resolve()).toBe(true);
-    });
-    expect(innerAttempt?.resolve(action)).toBe(true);
-    expect(action).toHaveBeenCalledOnce();
-    expect(outer.resolve()).toBe(true);
-  });
-
-  it("allows silent removal from any layer but action only from the top", () => {
-    const outerAction = vi.fn();
-    const outer = runtime.add({ onBack: vi.fn() });
-    const inner = runtime.add({ onBack: vi.fn() });
-
-    expect(outer.resolve(outerAction)).toBe(false);
-    expect(outerAction).not.toHaveBeenCalled();
-    expect(outer.resolve()).toBe(true);
-
-    const innerAction = vi.fn();
-    expect(inner.resolve(innerAction)).toBe(true);
-    expect(innerAction).not.toHaveBeenCalled();
-    history.emitBase();
-    expect(innerAction).toHaveBeenCalledOnce();
-  });
-
-  it("runs the final action only after the base change and commits first", () => {
-    let replacement: BackGuard | undefined;
-    const action = vi.fn(() => {
-      replacement = runtime.add({ onBack: vi.fn() });
-    });
-    const guard = runtime.add({ onBack: vi.fn() });
-    const sentinel = history.sentinels[0];
-
-    expect(guard.resolve(action)).toBe(true);
-    expect(sentinel?.release).toHaveBeenCalledOnce();
-    expect(action).not.toHaveBeenCalled();
-    expect(() => runtime.add({ onBack: vi.fn() })).toThrow(
-      "navigation action is already being committed",
-    );
-
-    expect(history.emitBase()).toHaveBeenCalledOnce();
-    expect(action).toHaveBeenCalledOnce();
-    expect(history.sentinels).toHaveLength(2);
-    expect(replacement?.resolve()).toBe(true);
-  });
-
-  it("queues recreate during silent final traversal and pushes one new sentinel", () => {
-    const old = runtime.add({ onBack: vi.fn() });
-    expect(old.resolve()).toBe(true);
-    expect(history.sentinels).toHaveLength(1);
-
-    const onBack = vi.fn();
-    const replacement = runtime.add({ onBack });
-    const another = runtime.add({ onBack: vi.fn() });
-    expect(history.sentinels).toHaveLength(1);
-    expect(another.resolve()).toBe(true);
+  it("coalesces repeated Back while an asynchronous decision is pending", async () => {
+    const decision = deferred();
+    const onBack = vi
+      .fn<(attempt: BackAttempt) => void | PromiseLike<void>>()
+      .mockImplementationOnce(() => decision.promise)
+      .mockImplementation(() => undefined);
+    const guard = runtime.add(onBack);
 
     history.emitBase();
-    expect(history.sentinels).toHaveLength(2);
     history.emitBase();
     expect(onBack).toHaveBeenCalledOnce();
-    expect(replacement.resolve()).toBe(true);
+
+    decision.resolve();
+    await decision.promise;
+    await Promise.resolve();
+    history.emitBase();
+    expect(onBack).toHaveBeenCalledTimes(2);
+
+    const disposed = guard.dispose();
+    history.emitBase();
+    await disposed;
   });
 
-  it("lets a queued replacement disappear silently but not commit an action", () => {
-    const old = runtime.add({ onBack: vi.fn() });
-    expect(old.resolve()).toBe(true);
-    const queued = runtime.add({ onBack: vi.fn() });
-    const action = vi.fn();
+  it("allows the final Back only after sentinel cleanup reaches its base", async () => {
+    const decision = deferred();
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
 
-    expect(queued.resolve(action)).toBe(false);
-    expect(queued.resolve()).toBe(true);
+    history.emitBase();
+    expect(attempt?.allow()).toBe(true);
+    expect(currentSentinel().release).toHaveBeenCalledOnce();
+    expect(history.back).not.toHaveBeenCalled();
+
+    const disposed = guard.dispose();
+    history.emitBase();
+    expect(history.back).toHaveBeenCalledOnce();
+    await disposed;
+    decision.resolve();
+  });
+
+  it("keeps a lower pending attempt paused until the upper guard is gone", async () => {
+    const outerDecision = deferred();
+    const innerDecision = deferred();
+    let outerAttempt: BackAttempt | undefined;
+    const outer = runtime.add((attempt) => {
+      outerAttempt = attempt;
+      return outerDecision.promise;
+    });
     history.emitBase();
 
-    expect(action).not.toHaveBeenCalled();
-    expect(history.sentinels).toHaveLength(1);
-    expect(queued.resolve()).toBe(false);
+    const inner = runtime.add(() => innerDecision.promise);
+    history.emitBase();
+    expect(outerAttempt?.allow()).toBe(false);
+
+    await inner.dispose();
+    expect(outerAttempt?.allow()).toBe(true);
+    const disposed = outer.dispose();
+    history.emitBase();
+    await disposed;
+    outerDecision.resolve();
+    innerDecision.resolve();
   });
 
-  it("rolls back a synchronous history.back failure and keeps the guard pending", () => {
+  it("allows a top logical layer without continuing the physical Back", async () => {
+    const decision = deferred();
+    const outer = runtime.add(vi.fn());
+    let innerAttempt: BackAttempt | undefined;
+    const inner = runtime.add((attempt) => {
+      innerAttempt = attempt;
+      return decision.promise;
+    });
+
+    history.emitBase();
+    expect(innerAttempt?.allow()).toBe(true);
+    expect(currentSentinel().release).not.toHaveBeenCalled();
+    expect(history.back).not.toHaveBeenCalled();
+    await inner.dispose();
+
+    const disposed = outer.dispose();
+    history.emitBase();
+    await disposed;
+    decision.resolve();
+  });
+
+  it("disposes any layer and awaits cleanup only for the final layer", async () => {
+    const outer = runtime.add(vi.fn());
+    const inner = runtime.add(vi.fn());
+
+    await outer.dispose();
+    expect(currentSentinel().release).not.toHaveBeenCalled();
+
+    let settled = false;
+    const disposed = inner.dispose().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    history.emitBase();
+    await disposed;
+    expect(settled).toBe(true);
+  });
+
+  it("queues recreate during final disposal and creates one new sentinel", async () => {
+    const old = runtime.add(vi.fn());
+    const oldDisposed = old.dispose();
+    const replacementBack = vi.fn();
+    const replacement = runtime.add(replacementBack);
+    const cancelled = runtime.add(vi.fn());
+    await cancelled.dispose();
+
+    expect(history.sentinels).toHaveLength(1);
+    history.emitBase();
+    await oldDisposed;
+    expect(history.sentinels).toHaveLength(2);
+
+    history.emitBase();
+    expect(replacementBack).toHaveBeenCalledOnce();
+    const disposed = replacement.dispose();
+    history.emitBase();
+    await disposed;
+  });
+
+  it("rejects new guards after the final Back has been allowed", async () => {
+    const decision = deferred();
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
+    history.emitBase();
+
+    expect(attempt?.allow()).toBe(true);
+    expect(() => runtime.add(vi.fn())).toThrow(
+      "a Back navigation is already being allowed",
+    );
+
+    const disposed = guard.dispose();
+    history.emitBase();
+    await disposed;
+    decision.resolve();
+  });
+
+  it("rejects disposal when release rolls back and permits retry", async () => {
     const error = new Error("back failed");
-    const onError = vi.fn();
-    const guard = runtime.add({ onBack: vi.fn(), onError });
+    const guard = runtime.add(vi.fn());
     const sentinel = currentSentinel();
     sentinel.releaseFailure = error;
-    const action = vi.fn();
 
-    expect(guard.resolve(action)).toBe(false);
+    await expect(guard.dispose()).rejects.toBe(error);
     expect(sentinel.current).toBe(true);
-    expect(onError).toHaveBeenCalledWith(error);
-    expect(action).not.toHaveBeenCalled();
+    expect(history.report).not.toHaveBeenCalled();
 
     sentinel.releaseFailure = undefined;
-    expect(guard.resolve(action)).toBe(true);
+    const disposed = guard.dispose();
     history.emitBase();
-    expect(action).toHaveBeenCalledOnce();
+    await disposed;
   });
 
-  it("fails closed if a synchronous back failure cannot be rolled back", () => {
+  it("reports a failed allow and keeps the attempt valid after rollback", async () => {
+    const decision = deferred();
+    const error = new Error("back failed");
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
+    history.emitBase();
+    currentSentinel().releaseFailure = error;
+
+    expect(attempt?.allow()).toBe(false);
+    expect(history.report).toHaveBeenCalledWith(error);
+
+    currentSentinel().releaseFailure = undefined;
+    expect(attempt?.allow()).toBe(true);
+    const disposed = guard.dispose();
+    history.emitBase();
+    await disposed;
+    decision.resolve();
+  });
+
+  it("fails closed if disposal cannot roll back the marker", async () => {
     const error = new Error("back failed after replacement");
-    const onError = vi.fn();
-    const guard = runtime.add({ onBack: vi.fn(), onError });
+    const guard = runtime.add(vi.fn());
     const sentinel = currentSentinel();
     sentinel.releaseFailure = error;
     sentinel.rollbackSucceeds = false;
 
-    expect(guard.resolve()).toBe(false);
-    expect(guard.resolve()).toBe(false);
-    expect(onError).toHaveBeenCalledWith(error);
-
-    const replacement = runtime.add({ onBack: vi.fn() });
+    await expect(guard.dispose()).rejects.toBe(error);
+    await expect(guard.dispose()).rejects.toBe(error);
+    const replacement = runtime.add(vi.fn());
     expect(history.sentinels).toHaveLength(2);
-    expect(replacement.resolve()).toBe(true);
+
+    const disposed = replacement.dispose();
+    history.emitBase();
+    await disposed;
   });
 
-  it("re-arms an unresolved callback rejection and reports it", async () => {
+  it("re-arms after an unhandled callback rejection and reports it", async () => {
     const error = new Error("dialog failed");
-    const onError = vi.fn();
     const onBack = vi
       .fn<(attempt: BackAttempt) => void | PromiseLike<void>>()
       .mockRejectedValueOnce(error)
       .mockImplementationOnce(() => undefined);
-    const guard = runtime.add({ onBack, onError });
+    const guard = runtime.add(onBack);
 
     history.emitBase();
-    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(error));
+    await vi.waitFor(() => expect(history.report).toHaveBeenCalledWith(error));
     history.emitBase();
     expect(onBack).toHaveBeenCalledTimes(2);
-    expect(guard.resolve()).toBe(true);
+
+    const disposed = guard.dispose();
+    history.emitBase();
+    await disposed;
   });
 
-  it("reports action rejection without resurrecting a consumed layer", async () => {
-    const error = new Error("action failed");
-    const onError = vi.fn();
-    const outer = runtime.add({ onBack: vi.fn() });
-    const inner = runtime.add({ onBack: vi.fn(), onError });
-
-    expect(inner.resolve(() => Promise.reject(error))).toBe(true);
-    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(error));
-    expect(inner.resolve()).toBe(false);
-    expect(outer.resolve()).toBe(true);
-  });
-
-  it("invalidates the generation when its sentinel was externally replaced", () => {
-    const onError = vi.fn();
-    const guard = runtime.add({ onBack: vi.fn(), onError });
+  it("invalidates a generation when its sentinel was externally replaced", async () => {
+    const guard = runtime.add(vi.fn());
     currentSentinel().current = false;
 
-    expect(guard.resolve()).toBe(false);
-    expect(onError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: expect.stringContaining("sentinel was replaced") }),
-    );
-    expect(guard.resolve()).toBe(false);
-
-    runtime.add({ onBack: vi.fn() });
+    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
+    expect(history.report).not.toHaveBeenCalled();
+    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
+    runtime.add(vi.fn());
     expect(history.sentinels).toHaveLength(2);
   });
 
-  it("invalidates a generation when sentinel restoration fails", () => {
+  it("reports ownership loss discovered by allow", async () => {
+    const decision = deferred();
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
+    history.emitBase();
+    currentSentinel().current = false;
+
+    expect(attempt?.allow()).toBe(false);
+    expect(history.report).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("sentinel was replaced") }),
+    );
+    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
+    decision.resolve();
+  });
+
+  it("invalidates a generation when sentinel restoration fails", async () => {
     const error = new Error("restore failed");
-    const onError = vi.fn();
-    const guard = runtime.add({ onBack: vi.fn(), onError });
+    const guard = runtime.add(vi.fn());
     currentSentinel().restoreFailure = error;
 
     expect(history.emitBase()).toHaveBeenCalledOnce();
-    expect(onError).toHaveBeenCalledWith(error);
-    expect(guard.resolve()).toBe(false);
+    expect(history.report).toHaveBeenCalledWith(error);
+    await expect(guard.dispose()).rejects.toBe(error);
   });
 
-  it("invalidates a queued generation when sentinel recreation fails", () => {
-    const first = runtime.add({ onBack: vi.fn() });
-    expect(first.resolve()).toBe(true);
+  it("invalidates queued guards when sentinel recreation fails", async () => {
+    const old = runtime.add(vi.fn());
+    const oldDisposed = old.dispose();
     const error = new Error("create failed");
-    const onError = vi.fn();
-    const replacement = runtime.add({ onBack: vi.fn(), onError });
+    const replacement = runtime.add(vi.fn());
     history.createFailure = error;
 
     history.emitBase();
-    expect(onError).toHaveBeenCalledWith(error);
-    expect(replacement.resolve()).toBe(false);
+    await oldDisposed;
+    expect(history.report).toHaveBeenCalledWith(error);
+    await expect(replacement.dispose()).rejects.toBe(error);
   });
 
-  it("does not consume a change that misses the known base", () => {
-    const onError = vi.fn();
-    const guard = runtime.add({ onBack: vi.fn(), onError });
-
+  it("does not consume a change that misses the known base", async () => {
+    const guard = runtime.add(vi.fn());
     const intercept = history.emit({ external: true });
 
     expect(intercept).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledWith(
+    expect(history.report).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("guarded base") }),
     );
-    expect(guard.resolve()).toBe(false);
+    await expect(guard.dispose()).rejects.toThrow("guarded base");
   });
 
+  it("reports a final physical Back failure after closing the guard", async () => {
+    const decision = deferred();
+    const error = new Error("final back failed");
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
+    history.emitBase();
+    history.backFailure = error;
+
+    expect(attempt?.allow()).toBe(true);
+    const disposed = guard.dispose();
+    history.emitBase();
+    await disposed;
+    expect(history.report).toHaveBeenCalledWith(error);
+    decision.resolve();
+  });
 });

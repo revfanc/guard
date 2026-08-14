@@ -1,20 +1,15 @@
 import { createGuard } from "./runtime";
-import type { BackGuard, BackGuardOptions } from "./types";
+import type { BackGuard, BackHandler } from "./types";
 
 export type {
-  BackAction,
   BackAttempt,
   BackGuard,
-  BackGuardOptions,
-  BackResolution,
+  BackHandler,
 } from "./types";
 
-export function createBackGuard(options: BackGuardOptions): BackGuard {
-  if (!options || typeof options.onBack !== "function") {
-    throw new TypeError("@revfanc/guard: options.onBack must be a function.");
-  }
-  if (options.onError !== undefined && typeof options.onError !== "function") {
-    throw new TypeError("@revfanc/guard: options.onError must be a function.");
+export function createBackGuard(onBack: BackHandler): BackGuard {
+  if (typeof onBack !== "function") {
+    throw new TypeError("@revfanc/guard: onBack must be a function.");
   }
 
   const target = typeof window === "undefined" ? undefined : window;
@@ -30,5 +25,5 @@ export function createBackGuard(options: BackGuardOptions): BackGuard {
     );
   }
 
-  return createGuard(target, options);
+  return createGuard(target, onBack);
 }

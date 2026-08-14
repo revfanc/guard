@@ -14,79 +14,50 @@ pnpm add @revfanc/guard
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
-const guard = createBackGuard({
-  async onBack(attempt) {
-    const confirmed = await confirmLeaving()
-
-    if (!confirmed) {
-      attempt.resolve()
-      return
-    }
-
-    attempt.resolve(() => history.back())
-  },
-  onError(error) {
-    console.error("Back guard failed", error)
-  },
+const guard = createBackGuard(async (attempt) => {
+  if (await confirmLeaving()) {
+    attempt.allow()
+  }
 })
 
-// Resolve this guard without a navigation action during component cleanup.
-guard.resolve()
+// Await cleanup before an active navigation.
+await guard.dispose()
+await router.push("/next")
 ```
 
-If `onError` is omitted, reported failures may reach the browser's global
-`error` or `unhandledrejection` channel.
+The library adds one same-URL sentinel entry. A single-step Back returns to the
+protected entry, restores the sentinel, and calls the handler. Calling
+`attempt.allow()` accepts that Back; when it is the final guard, the library
+cleans its sentinel and continues the original Back automatically. If the
+handler settles without calling `allow()`, the page stays protected and the
+next Back creates a new attempt.
 
-The library adds one same-URL sentinel entry. A single-step back returns to the
-protected entry, restores the sentinel, and calls `onBack` once. Attempts and
-guards share one verb: `resolve()`. Without an action it settles silently;
-with an action it commits the guard and runs that action when it is safe. For an
-attempt, silent resolution means staying and arming the same guard again. For a
-guard, it means ending that guard's lifecycle.
+An asynchronous dialog must return its Promise. Repeated Back requests are
+coalesced while that Promise is pending.
 
-Both overloads return whether the transition was accepted. The first accepted
-resolution wins; later calls return `false`, and an action is never run more
-than once. A final actionful resolution first returns from the sentinel to the
-protected base entry, then runs the action. The library does not choose the
-final navigation for you:
-
-```ts
-guard.resolve(() => router.push("/next"))
-```
+`guard.dispose()` stops guarding without navigating. Its Promise resolves after
+the final sentinel cleanup, so active navigation can safely follow it. Unhandled
+handler and internal event errors reach the browser's global error channel;
+errors caused directly by `dispose()` reject its Promise.
 
 ## Scope
 
 Supported:
 
 - native, same-document `history.back()` and `history.go(-1)` attempts;
-- asynchronous decisions without duplicate `onBack` calls;
-- LIFO guards, with a paused attempt resuming after the guard above it resolves;
-- silent resolution of any guard layer, and actionful resolution of the top layer;
-- queued teardown/recreation while a silent sentinel cleanup is in progress; the replacement becomes active only after the cleanup reaches its base.
+- asynchronous decisions without duplicate handler calls;
+- LIFO guards and disposal of any guard layer;
+- queued teardown/recreation while sentinel cleanup is in progress.
 
 Not guaranteed:
 
-- router POP behavior or listener ordering in Vue Router, React Router, or other routers;
-- reload, tab close, address-bar and cross-document navigation;
-- long-press history selection, `history.go(-N)`, or queued rapid back requests, including the not-yet-active recreate window;
-- forward navigation or external `pushState` / `replaceState` while a guard is active.
+- Vue Router, React Router, or another router's POP behavior and listener order;
+- reload, tab close, address-bar, or cross-document navigation;
+- long-press history selection, `history.go(-N)`, or queued rapid Back requests;
+- forward navigation or external `pushState` / `replaceState` while active.
 
+Use a router's own navigation guard or blocker when router POP must be covered.
 See the [browser and state boundaries](https://revfanc.github.io/guard/guide/limitations).
-
-## Tooling and layout
-
-The package uses [tsdown](https://tsdown.dev/) for ESM, CommonJS, declarations,
-and source maps. Vite serves the vanilla browser fixture, Vitest covers the
-state machine, and Playwright verifies Chromium, Firefox, and WebKit.
-
-```text
-src/                  Library source
-tests/unit/           Deterministic state-machine tests
-tests/e2e/            Vanilla three-browser behavior tests
-docs/                 VitePress documentation
-tsdown.config.ts      ESM/CJS library build
-tsconfig.build.json   ES2015 build boundary
-```
 
 ## Development
 

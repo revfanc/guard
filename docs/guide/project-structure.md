@@ -1,52 +1,37 @@
 # 工程结构与构建
 
-## 工具选择
+## 工具职责
 
-本库使用 **tsdown** 构建发布产物。它以 Rolldown 为底层，面向 TypeScript 库提供 ESM、CommonJS、声明文件与 source map 输出；相比直接用 Vite 的 library mode，双格式与类型产物所需配置更少。
-
-Vite 继续负责浏览器测试 fixture，VitePress 负责文档站。职责保持分离：
-
-- tsdown：npm 库打包与类型产物。
-- Vitest：纯逻辑和 History API 状态机单测。
-- Playwright：Chromium、Firefox、WebKit 的真实浏览器兼容验证。
+- tsdown：npm 库打包、ESM/CommonJS 和类型声明。
+- Vitest：状态机与 History 协议单测。
+- Playwright：Chromium、Firefox、WebKit 的真实浏览器验证。
 - VitePress：指南与 API 文档。
 
-## 推荐目录
+## 目录
 
 ```text
 guard/
 ├─ src/
-│  ├─ index.ts             # 唯一公开入口与导出
-│  ├─ types.ts             # 稳定的公开类型
-│  ├─ history.ts           # 哨兵能力与全部 History API 副作用
-│  └─ runtime.ts           # resolve、LIFO 与三阶段状态转换
+│  ├─ index.ts             # 唯一公开入口
+│  ├─ types.ts             # BackHandler / Attempt / Guard
+│  ├─ history.ts           # sentinel 与 History API 副作用
+│  └─ runtime.ts           # allow、dispose、LIFO 与状态转换
 ├─ tests/
-│  ├─ unit/                # 快速、确定性的边界与异常测试
-│  └─ e2e/
-│     ├─ fixture/          # 纯原生 History API 小应用
-│     └─ specs/            # 三浏览器用户行为测试
+│  ├─ unit/                # 确定性的边界与异常测试
+│  └─ e2e/                 # 三浏览器原生 History fixture
 ├─ docs/                   # VitePress 文档
-├─ scripts/                # tarball / exports 发布检查
-├─ tsdown.config.ts        # ESM + CJS + declarations，target ES2015
-├─ tsconfig.json           # 编辑器、源码和测试类型规则
-├─ tsconfig.build.json     # 发布构建的 ES2015 边界
-├─ vitest.config.ts        # 单元测试
-├─ playwright.config.ts    # 浏览器矩阵
-└─ package.json            # exports、sideEffects 与发布脚本
+├─ scripts/                # tarball、exports 与 tree-shaking 检查
+└─ tsdown.config.ts        # ESM + CJS + declarations
 ```
 
-实现文件可以继续按复杂度拆分，但只有 `src/index.ts` 是包的公开边界。内部模块不应成为隐式 deep import 契约。
-
-运行时应把统一的 `resolve()` / `resolve(action)` 作为公开命令，内部集中处理 `idle`、`anchored`、`traversing` 三个阶段；`traversing` 再用 `restart` 与 `action` 区分静默重建和不可撤销提交。不要把阶段布尔值、History 副作用或额外的导航方法扩散到公开 API。
+只有 `src/index.ts` 是公开模块。内部保持 `idle`、`armed`、`traversing` 三阶段；公开 API 不暴露阶段、History marker 或业务导航 action。
 
 ## 发布约束
 
-- `exports.import` 指向 ESM，`exports.require` 指向 CommonJS，并为两者提供匹配的声明文件。
-- 编译目标为 ES2015；源码与最终产物均不能无意依赖 `Array.prototype.at`、`Promise.allSettled` 等更晚的运行时 API。
-- `sideEffects: false` 要求模块顶层不安装监听器。只有实际调用 `createBackGuard()` 才创建运行时，因此未使用导出可以被 Tree Shaking。
-- `prepack` 在打包 npm tarball 前重新构建；发布检查应从 tarball 验证 ESM、CJS、类型入口与实际文件清单。
-
-本地提交前运行：
+- `exports.import` 与 `exports.require` 分别提供 ESM/CJS 和匹配声明。
+- 目标为 ES2015，不能无意依赖更晚运行时 API。
+- `sideEffects: false` 要求模块导入时不安装监听器。
+- 发布检查从真实 tarball 验证文件列表、入口、类型和 tree-shaking。
 
 ```bash
 pnpm check

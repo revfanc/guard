@@ -6,59 +6,51 @@
 pnpm add @revfanc/guard
 ```
 
-包提供 ESM 与 CommonJS 入口，运行时代码兼容 ES2015，并且没有运行时依赖。
+包同时提供 ESM 与 CommonJS 入口，运行时代码兼容 ES2015，没有运行时依赖。
 
-## 创建 guard
-
-在受保护页面挂载后创建 guard：
+## 创建 Guard
 
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
-const guard = createBackGuard({
-  async onBack(attempt) {
-    const confirmed = await confirmLeaving()
-
-    if (!confirmed) {
-      attempt.resolve()
-      return
-    }
-
-    attempt.resolve(() => history.back())
-  },
-  onError(error) {
-    console.error("Back guard failed", error)
-  },
+const guard = createBackGuard(async (attempt) => {
+  if (await confirmLeaving()) {
+    attempt.allow()
+  }
 })
 ```
 
-建议提供同步的 `onError` 统一记录异常。未配置时，错误可能进入浏览器全局 `error` 或 `unhandledrejection` 通道。
+创建时会增加一条同 URL sentinel。用户单步返回后，库恢复保护并调用 handler：
 
-创建时会增加一条同 URL 哨兵记录。用户单步返回后，库恢复保护并调用 `onBack`：
+- 调用 `attempt.allow()`：同意这次返回；最后一层会自动继续原始 Back。
+- handler 完成但没有调用 `allow()`：留在页面并重新等待下一次返回。
+- handler Promise pending：重复 Back 不会产生第二个 attempt。
 
-- `attempt.resolve()`：静默解决这次 attempt，留在页面；之后再次返回会产生新的 attempt。
-- `attempt.resolve(action)`：完成这一层 guard；最后一层会先回到受保护 base，再执行 action。
+异步弹窗必须返回 Promise：
 
-`resolve` 不替业务选择去向，因此返回上一条业务记录要明确传入 `() => history.back()`。两个 overload 都返回本次解决是否被接受；同一对象第一次被接受的调用决定结果，后续调用返回 `false`。最后一层静默解决也始终包含一次内部同文档 traversal，只是没有业务 action。
-
-Attempt 与 Guard 共享同一个心智模型：不传 action 就静默解决，传 action 就在安全时机执行一次业务动作。它们结束的对象不同：`attempt.resolve()` 只结束本次返回并重新等待，`guard.resolve()` 则结束整个 guard 生命周期。
+```ts
+const guard = createBackGuard((attempt) => {
+  return openDialog().then((confirmed) => {
+    if (confirmed) attempt.allow()
+  })
+})
+```
 
 ## 生命周期清理
 
-```ts
-onUnmounted(() => {
-  guard.resolve()
-})
-```
-
-`guard.resolve()` 是无 action 的生命周期结束。静默解决可以移除任意栈层；若最后一层需要清理 sentinel，快速 recreate 会进入队列，不必在组件的 unmount → mount 竞态中自行等待。
-
-主动跳转必须使用 actionful overload，把 router 操作交给 guard 在安全时机执行：
+组件卸载时结束 Guard：
 
 ```ts
-guard.resolve(() => router.push("/next"))
+void guard.dispose().catch(reportError)
 ```
 
-不要写成 `guard.resolve(); router.push(...)`：静默清理可能仍在进行，随后的导航会与内部 History 遍历竞争。Actionful resolve 只允许栈顶 guard；返回 `false` 时 action 不会执行。
+需要主动跳转时应等待清理完成：
 
-框架接入只作为生命周期示例；上面的主动 push 写法用于协调本库自己的 sentinel，不代表库保证 router POP 或 router 与原生 `popstate` 的监听顺序。详见[浏览器限制](./limitations)。
+```ts
+await guard.dispose()
+await router.push("/next")
+```
+
+`dispose()` 不会替业务导航；它只清除本库自己的保护。快速 unmount → mount 时，可以在旧 Promise 完成前创建下一代 Guard，runtime 会将它排队并在 base `popstate` 后激活。
+
+这个包只处理原生单步 Back。Vue Router、React Router 等路由器的 POP 和监听顺序不属于保证范围；需要覆盖应用内路由跳转时，使用 router 自身的 navigation guard 或 blocker。

@@ -1,22 +1,20 @@
 import guard = require("@revfanc/guard");
 
-const action: guard.BackAction = () => Promise.resolve("navigated");
-function checkAttempt(attempt: guard.BackAttempt): void {
-  const results: boolean[] = [attempt.resolve(), attempt.resolve(action)];
-  void results;
-}
-const options: guard.BackGuardOptions = { onBack: checkAttempt };
-const resolution: guard.BackResolution = guard.createBackGuard(options);
-const instance: guard.BackGuard = resolution;
-const results: boolean[] = [resolution.resolve(), instance.resolve(action)];
+const onBack: guard.BackHandler = (attempt: guard.BackAttempt) => {
+  const accepted: boolean = attempt.allow();
+  void accepted;
+};
+const instance: guard.BackGuard = guard.createBackGuard(onBack);
+const disposal: Promise<void> = instance.dispose();
+declare const attempt: guard.BackAttempt;
 
-// @ts-expect-error resolve(undefined) must not become silent resolution.
-resolution.resolve(undefined);
-// @ts-expect-error legacy methods must not return to the public contract.
-resolution.stay();
-// @ts-expect-error legacy methods must not return to the public contract.
-resolution.done();
-// @ts-expect-error lifecycle cleanup is expressed by resolve().
-instance.dispose();
+// @ts-expect-error createBackGuard accepts a handler, not an options object.
+guard.createBackGuard({ onBack });
+// @ts-expect-error allow never accepts a navigation callback.
+attempt.allow(() => undefined);
+// @ts-expect-error the old unified method must not return.
+instance.resolve();
+// @ts-expect-error legacy lifecycle names must not return.
+instance.done();
 
-void results;
+void disposal;

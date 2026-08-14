@@ -4,9 +4,7 @@ const STATE_KEY = "__revfanc_guard__";
 
 export function mountVanillaFixture(): void {
   const root = document.querySelector<HTMLDivElement>("#app");
-  if (!root) {
-    return;
-  }
+  if (!root) return;
 
   const screen = new URLSearchParams(location.search).get("screen");
   if (screen === "replaced") {
@@ -21,24 +19,23 @@ export function mountVanillaFixture(): void {
       <button data-testid="enter">Enter protected page</button>
       <section data-testid="protected-controls" hidden>
         <button data-testid="back">history.back()</button>
-        <button data-testid="resolve-attempt">Resolve attempt</button>
-        <button data-testid="resolve-back">Resolve, then Back</button>
-        <button data-testid="resolve-replace">Resolve, then replace</button>
-        <button data-testid="resolve-guard">Resolve guard</button>
-        <button data-testid="recreate-a">Resolve and recreate A</button>
+        <button data-testid="deny-attempt">Deny attempt</button>
+        <button data-testid="allow-attempt">Allow attempt</button>
+        <button data-testid="dispose-replace">Dispose, then replace</button>
+        <button data-testid="dispose-guard">Dispose guard</button>
+        <button data-testid="recreate-a">Dispose and recreate A</button>
         <button data-testid="cycle-a">Cycle A 100 times</button>
         <button data-testid="add-b">Add guard B</button>
-        <button data-testid="try-a-action">Try paused A</button>
-        <button data-testid="resolve-b">Resolve B</button>
-        <button data-testid="resume-a-action">Resume A</button>
+        <button data-testid="try-a-allow">Try paused A</button>
+        <button data-testid="allow-b">Allow B</button>
+        <button data-testid="dispose-b">Dispose B</button>
+        <button data-testid="resume-a-allow">Resume A</button>
         <button data-testid="replace-sentinel">Replace sentinel</button>
       </section>
       <output data-testid="a-attempts">0</output>
       <output data-testid="b-attempts">0</output>
       <output data-testid="popstates">0</output>
       <output data-testid="decision">idle</output>
-      <output data-testid="actions">0</output>
-      <output data-testid="action-base">none</output>
       <output data-testid="cycles">0</output>
       <output data-testid="cycle-length">0</output>
     </main>`;
@@ -46,7 +43,9 @@ export function mountVanillaFixture(): void {
   let guardA: BackGuard | undefined;
   let guardB: BackGuard | undefined;
   let attemptA: BackAttempt | undefined;
-  let actionCount = 0;
+  let attemptB: BackAttempt | undefined;
+  let finishA: (() => void) | undefined;
+  let finishB: (() => void) | undefined;
 
   const query = <T extends HTMLElement>(name: string): T =>
     root.querySelector<T>(`[data-testid="${name}"]`)!;
@@ -54,6 +53,10 @@ export function mountVanillaFixture(): void {
   const reportError = (error: unknown): void => {
     query("decision").textContent = `error:${String(error)}`;
   };
+  Object.defineProperty(window, "reportError", {
+    configurable: true,
+    value: reportError,
+  });
 
   const hasMarker = (): boolean => {
     const state: unknown = history.state;
@@ -64,34 +67,35 @@ export function mountVanillaFixture(): void {
     );
   };
 
-  const recordActionBase = (): void => {
-    query("action-base").textContent = `${location.search}:${String(hasMarker())}`;
-  };
-
-  const countAction = (): void => {
-    actionCount += 1;
-    query("actions").textContent = String(actionCount);
-  };
-
   const createA = (): BackGuard =>
-    createBackGuard({
-      onBack(attempt) {
-        attemptA = attempt;
-        const count = Number(query("a-attempts").textContent ?? "0") + 1;
-        query("a-attempts").textContent = String(count);
-      },
-      onError: reportError,
+    createBackGuard((attempt) => {
+      attemptA = attempt;
+      const count = Number(query("a-attempts").textContent ?? "0") + 1;
+      query("a-attempts").textContent = String(count);
+      return new Promise<void>((resolve) => {
+        finishA = resolve;
+      });
     });
 
   const waitForMarker = async (): Promise<void> => {
     const deadline = performance.now() + 5_000;
     while (performance.now() < deadline) {
-      if (hasMarker()) {
-        return;
-      }
+      if (hasMarker()) return;
       await new Promise((resolve) => window.setTimeout(resolve, 5));
     }
     throw new Error("sentinel recreation timed out");
+  };
+
+  const finishAttemptA = (): void => {
+    finishA?.();
+    finishA = undefined;
+    attemptA = undefined;
+  };
+
+  const finishAttemptB = (): void => {
+    finishB?.();
+    finishB = undefined;
+    attemptB = undefined;
   };
 
   query("enter").addEventListener("click", () => {
@@ -106,42 +110,48 @@ export function mountVanillaFixture(): void {
     window.setTimeout(() => history.back(), 0);
   });
 
-  query("resolve-attempt").addEventListener("click", () => {
-    query("decision").textContent =
-      `attempt:${String(attemptA?.resolve() ?? false)}`;
+  query("deny-attempt").addEventListener("click", () => {
+    finishAttemptA();
+    query("decision").textContent = "attempt:denied";
   });
 
-  query("resolve-back").addEventListener("click", () => {
-    const accepted =
-      attemptA?.resolve(() => {
-        recordActionBase();
-        history.back();
-      }) ?? false;
-    query("decision").textContent = `back:${String(accepted)}`;
+  query("allow-attempt").addEventListener("click", () => {
+    const accepted = attemptA?.allow() ?? false;
+    finishAttemptA();
+    query("decision").textContent = `attempt:${String(accepted)}`;
   });
 
-  query("resolve-replace").addEventListener("click", () => {
-    const accepted =
-      attemptA?.resolve(() => {
-        location.replace("/?screen=replaced");
-      }) ?? false;
-    query("decision").textContent = `replace:${String(accepted)}`;
+  query("dispose-replace").addEventListener("click", () => {
+    const current = guardA;
+    guardA = undefined;
+    void current
+      ?.dispose()
+      .then(() => location.replace("/?screen=replaced"))
+      .catch(reportError);
   });
 
-  query("resolve-guard").addEventListener("click", () => {
-    const accepted = guardA?.resolve() ?? false;
-    if (accepted) {
-      guardA = undefined;
-    }
-    query("decision").textContent = `guard:${String(accepted)}`;
+  query("dispose-guard").addEventListener("click", () => {
+    const current = guardA;
+    guardA = undefined;
+    void current
+      ?.dispose()
+      .then(() => {
+        query("decision").textContent = "guard:disposed";
+      })
+      .catch(reportError);
   });
 
   query("recreate-a").addEventListener("click", () => {
-    const accepted = guardA?.resolve() ?? false;
-    if (accepted) {
-      guardA = createA();
-    }
-    query("decision").textContent = `recreate:${String(accepted)}`;
+    const current = guardA;
+    if (!current) return;
+    const disposal = current.dispose();
+    guardA = createA();
+    void disposal
+      .then(waitForMarker)
+      .then(() => {
+        query("decision").textContent = "recreate:done";
+      })
+      .catch(reportError);
   });
 
   query("cycle-a").addEventListener("click", () => {
@@ -154,10 +164,10 @@ export function mountVanillaFixture(): void {
         if (delay > 0 && count > 1) {
           await new Promise((resolve) => window.setTimeout(resolve, delay));
         }
-        if (!guardA?.resolve()) {
-          throw new Error(`cycle ${count} was rejected`);
-        }
+        if (!guardA) throw new Error(`cycle ${count} lost its guard`);
+        const disposal = guardA.dispose();
         guardA = createA();
+        await disposal;
         await waitForMarker();
         query("cycles").textContent = String(count);
       }
@@ -168,31 +178,44 @@ export function mountVanillaFixture(): void {
   });
 
   query("add-b").addEventListener("click", () => {
-    guardB = createBackGuard({
-      onBack() {
-        const count = Number(query("b-attempts").textContent ?? "0") + 1;
-        query("b-attempts").textContent = String(count);
-      },
-      onError: reportError,
+    guardB = createBackGuard((attempt) => {
+      attemptB = attempt;
+      const count = Number(query("b-attempts").textContent ?? "0") + 1;
+      query("b-attempts").textContent = String(count);
+      return new Promise<void>((resolve) => {
+        finishB = resolve;
+      });
     });
     query("decision").textContent = "b:added";
   });
 
-  query("try-a-action").addEventListener("click", () => {
-    const accepted = attemptA?.resolve(countAction) ?? false;
-    query("decision").textContent = `a-paused:${String(accepted)}`;
+  query("try-a-allow").addEventListener("click", () => {
+    query("decision").textContent =
+      `a-paused:${String(attemptA?.allow() ?? false)}`;
   });
 
-  query("resolve-b").addEventListener("click", () => {
-    const accepted = guardB?.resolve() ?? false;
-    if (accepted) {
-      guardB = undefined;
-    }
-    query("decision").textContent = `b:${String(accepted)}`;
+  query("allow-b").addEventListener("click", () => {
+    const accepted = attemptB?.allow() ?? false;
+    finishAttemptB();
+    guardB = undefined;
+    query("decision").textContent = `b-allowed:${String(accepted)}`;
   });
 
-  query("resume-a-action").addEventListener("click", () => {
-    const accepted = attemptA?.resolve(countAction) ?? false;
+  query("dispose-b").addEventListener("click", () => {
+    const current = guardB;
+    guardB = undefined;
+    finishAttemptB();
+    void current
+      ?.dispose()
+      .then(() => {
+        query("decision").textContent = "b:disposed";
+      })
+      .catch(reportError);
+  });
+
+  query("resume-a-allow").addEventListener("click", () => {
+    const accepted = attemptA?.allow() ?? false;
+    finishAttemptA();
     query("decision").textContent = `a-resumed:${String(accepted)}`;
   });
 
@@ -202,8 +225,16 @@ export function mountVanillaFixture(): void {
       "",
       location.href,
     );
-    const accepted = guardA?.resolve(countAction) ?? false;
-    query("decision").textContent += `:resolve:${String(accepted)}`;
+    const current = guardA;
+    guardA = undefined;
+    void current
+      ?.dispose()
+      .then(() => {
+        query("decision").textContent = "dispose:true";
+      })
+      .catch((error) => {
+        query("decision").textContent = `dispose:false:${String(error)}`;
+      });
   });
 
   addEventListener(

@@ -1,82 +1,80 @@
 # API
 
-## `createBackGuard(options)`
+## `createBackGuard(onBack)`
 
 ```ts
-function createBackGuard(options: BackGuardOptions): BackGuard
+function createBackGuard(onBack: BackHandler): BackGuard
+
+type BackHandler = (
+  attempt: BackAttempt,
+) => void | PromiseLike<void>
 ```
 
-在当前浏览器页面压入一个 guard。通常会立即建立一条同 URL 哨兵记录；如果前一代正在执行无 action cleanup，则新 guard 先进入 restart 队列，等内部遍历回到 base 后才建立哨兵并激活。SSR、非浏览器环境或所需 History API 不完整时抛出错误。
+在当前页面创建一层 Back Guard。首次创建会立即增加一条同 URL 哨兵记录；如果上一代正在执行 `dispose()` 清理，新 Guard 会排队，直到内部遍历回到 base 后再激活。
 
-### `BackGuardOptions`
+非浏览器环境、History API 不完整、handler 不是函数或当前 `history.state` 不符合契约时同步抛错。
 
-```ts
-interface BackGuardOptions {
-  onBack(attempt: BackAttempt): void | PromiseLike<void>
-  onError?(error: unknown): void
-}
-```
+### Handler 生命周期
 
-`onBack` 在当前 guard 第一次收到返回意图时调用。attempt 尚未决策时，重复返回不会重复调用它。即使 `onBack` 返回的 PromiseLike 尚未完成，只要 attempt 已经解决，下一次返回仍可产生新的 attempt。
+用户单步返回后，库先恢复 sentinel，再调用 handler：
 
-同步异常和 rejected Promise 会在 attempt 尚未解决时自动静默解决它、使 guard 重新等待，再交给 `onError`。如果 attempt 已经解决，则只报告错误，不改写 first-call-wins 的结果。未配置 `onError` 时，错误可能进入浏览器全局 `error` 或 `unhandledrejection` 通道；具体通道取决于浏览器的全局错误报告实现，业务异常不会导致意外放行。
+- handler pending 期间，重复 Back 不会重复调用 handler。
+- handler 完成但没有调用 `allow()`，表示拒绝本次返回；attempt 失效，Guard 重新等待。
+- 异步弹窗必须返回覆盖完整决策周期的 Promise。仅启动回调式弹窗后立即返回，会使 attempt 立即失效。
+- handler 的未处理 throw 或 rejection 会先使 attempt 失效并重新布防，再进入浏览器全局错误通道。
 
-## 统一的 `resolve`
-
-Attempt 与 Guard 只有同一个解决动作：
-
-```ts
-resolve(): boolean
-resolve(action: () => void | PromiseLike<unknown>): boolean
-```
-
-- 不传 action：静默解决当前对象，不执行业务动作。
-- 传入 action：提交当前对象，并在它能够安全完成时执行一次 action。
-- 返回值只表示请求的 resolution 是否被接受，不表示 action 已执行，也不表示 action 发起的导航已完成。`false` 不保证句柄仍可重试：sentinel 丢失或无法回滚的 History 失败会同时使整代 guard fail-closed。
-- 同一个对象采用 first-call-wins：第一次被接受的调用决定结果，之后调用返回 `false`。
-
-公开类型使用两个 overload，而不是可选参数。`resolve(undefined)` 不是“静默解决”的合法写法，避免一个可能为 `undefined` 的变量意外改变控制流。
-
-### `BackAttempt`
+## `BackAttempt`
 
 ```ts
 interface BackAttempt {
-  resolve(): boolean
-  resolve(action: () => void | PromiseLike<unknown>): boolean
+  allow(): boolean
 }
 ```
 
-- `attempt.resolve()` 结束当前提示、拒绝这次返回，并让同一个 guard 等待下一次单步返回。
-- `attempt.resolve(action)` 接受这次返回并完成当前 guard，在安全时机执行一次业务动作。
-- Attempt 只有在仍然有效且所属 guard 位于栈顶时才能解决。暂停、已完成或旧 attempt 返回 `false`，且不会执行 action。
-- 最后一层调用 `attempt.resolve(action)` 时，库先从哨兵回到受保护业务记录，再执行 action。库不会自动再调用一次 `history.back()`。
-- 非最后一层调用 `attempt.resolve(action)` 只完成该层并执行该层动作；它不会调用下层 `onBack`，也不会替下层作决定。
+`allow()` 无参数，表示同意当前这次 Back：
 
-`action` 可以是 `() => history.back()`、`() => location.replace(...)`、路由跳转回调或普通业务函数。同步返回值会被忽略；如果返回 PromiseLike，其 rejected 原因会交给同一错误通道。涉及 router 时须接受其[非保证边界](./guide/limitations)。
+- 只有仍有效且所属 Guard 位于栈顶时返回 `true`。
+- 暂停、过期或已经完成的 attempt 返回 `false`。
+- 如果它属于最后一层 Guard，库先清理 sentinel，再自动继续原始 Back。
+- 如果上方是逻辑嵌套 Guard，`allow()` 只完成该层并消费这次 Back，不会自动触发下层 handler。业务可以在调用前关闭该层对应的弹窗或局部 UI。
 
-### `BackGuard`
+`true` 只表示请求已被接受，不表示浏览器导航已经完成。
+
+## `BackGuard`
 
 ```ts
 interface BackGuard {
-  resolve(): boolean
-  resolve(action: () => void | PromiseLike<unknown>): boolean
+  dispose(): Promise<void>
 }
 ```
 
-- `guard.resolve()` 只结束该 guard 的生命周期，不执行业务动作。静默解决可以用于任意栈层；移除栈顶后，被暂停的下层 attempt 恢复有效，且不会重复调用下层 `onBack`。
-- `guard.resolve(action)` 表达主动、安全地完成这一层。它只在 guard 位于栈顶时被接受；非栈顶调用返回 `false`，action 不执行。
-- 非最后一层的 actionful resolve 移除栈顶并执行这一层 action。最后一层则先回到受保护 base，再执行 action。
+`dispose()` 结束该 Guard 的生命周期，不产生业务导航：
 
-主动 router 导航必须把导航放进 action，不能先静默解决再单独跳转：
+- 非最后一层可以立即移除。
+- 最后一层会清理 sentinel，并在观察到内部 base `popstate` 后 resolve。
+- 清理期间重复调用返回同一生命周期结果。
+- 同步 History 操作失败且 marker 成功回滚时，本次 Promise reject，Guard 仍可再次 `dispose()`。
+- 无法回滚或 sentinel 已丢失时整代 Guard fail-closed，后续调用继续 reject。
+
+主动导航必须等待清理：
 
 ```ts
-guard.resolve(() => router.push("/next"))
+await guard.dispose()
+await router.push("/next")
 ```
 
-最后一层 actionful resolve 返回 `true` 后，决定不可撤回。内部遍历完成前创建新 guard 会同步抛错；错误不会交给这个尚未创建的 guard。后续 `resolve()` 不会取消 action。目标 `popstate` 到达时，runtime 会先切到 idle，再调用 action，所以 action 内可以创建下一代 guard；它不等待 action 返回的 PromiseLike 完成。
+这只避免主动导航与本库 sentinel cleanup 竞争，不代表本库保证 router POP。
 
-最后一层静默 `resolve()` 始终发起一次内部同文档遍历，但不提交业务 action。清理期间新的 `createBackGuard()` 可以排队；排队句柄尚未开始保护页面，在激活前只能用无 action 的 `resolve()` 静默取消。`resolve(action)` 此时返回 `false`，可以等该 guard 激活并成为栈顶后重试。这个机制支持快速 unmount → mount 或 resolve → recreate，但不承诺在旧 cleanup 与新 sentinel 之间拦截并发 Back；一次遍历完成前排队多次 Back 明确不受支持。只有 actionful 的不可撤销遍历会拒绝 recreate。
+## 错误通道
+
+公开 API 不提供 `onError`：
+
+- 创建阶段的错误由 `createBackGuard()` 同步抛出。
+- `dispose()` 直接触发的错误通过其 Promise rejection 返回。
+- handler 未处理异常和 `popstate` 内部故障通过 `window.reportError()` 上报；不支持 `reportError` 的环境使用异步 throw 进入全局错误通道。
+
+业务要忽略或转换 handler 错误时，应在 handler 内自行 `try/catch`。调用 `dispose()` 的代码应按业务需要 await 或 catch。
 
 ## 类型导出
 
-包导出 `BackAction`、`BackResolution`、`BackAttempt`、`BackGuard` 和 `BackGuardOptions`。`BackAttempt` 与 `BackGuard` 都是统一 `BackResolution` 契约的语义别名。
+包导出 `BackAttempt`、`BackGuard` 和 `BackHandler`。运行时只导出 `createBackGuard`。

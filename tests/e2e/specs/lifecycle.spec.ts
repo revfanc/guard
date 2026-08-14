@@ -16,11 +16,11 @@ async function requestBack(page: Page): Promise<void> {
 test.describe("Guard lifecycle", () => {
   test.beforeEach(async ({ page }) => enterProtected(page));
 
-  test("final silent resolve leaves the next Back pointed at origin", async ({ page }) => {
+  test("awaited disposal leaves the next Back pointed at origin", async ({ page }) => {
     const popstates = page.getByTestId("popstates");
     const previous = Number(await popstates.textContent());
-    await page.getByTestId("resolve-guard").dispatchEvent("click");
-    await expect(page.getByTestId("decision")).toHaveText("guard:true");
+    await page.getByTestId("dispose-guard").dispatchEvent("click");
+    await expect(page.getByTestId("decision")).toHaveText("guard:disposed");
     await expect(popstates).toHaveText(String(previous + 1));
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
@@ -31,11 +31,11 @@ test.describe("Guard lifecycle", () => {
     await expect(page).toHaveURL(/screen=origin/);
   });
 
-  test("same-task resolve and recreate re-arms exactly one sentinel", async ({ page }) => {
+  test("same-task dispose and recreate re-arms exactly one sentinel", async ({ page }) => {
     const length = await page.evaluate(() => history.length);
 
     await page.getByTestId("recreate-a").dispatchEvent("click");
-    await expect(page.getByTestId("decision")).toHaveText("recreate:true");
+    await expect(page.getByTestId("decision")).toHaveText("recreate:done");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
       .toEqual(expect.any(String));
@@ -46,7 +46,7 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
   });
 
-  test("100 resolve and recreate cycles do not grow history", async ({
+  test("100 dispose and recreate cycles do not grow history", async ({
     page,
     browserName,
   }) => {
@@ -54,7 +54,6 @@ test.describe("Guard lifecycle", () => {
 
     if (browserName === "webkit") {
       await page.getByTestId("cycle-a").evaluate((button) => {
-        // Keep the stress loop below WebKit's History mutation rate limit.
         button.dataset.delay = "700";
       });
     }
@@ -72,13 +71,12 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
   });
 
-  test("external sentinel replacement fails closed without losing state", async ({ page }) => {
+  test("external sentinel replacement rejects disposal without losing state", async ({ page }) => {
     await page.getByTestId("replace-sentinel").dispatchEvent("click");
+    await expect(page.getByTestId("decision")).toContainText("dispose:false");
     await expect(page.getByTestId("decision")).toContainText(
       "sentinel was replaced",
     );
-    await expect(page.getByTestId("decision")).toContainText("resolve:false");
-    await expect(page.getByTestId("actions")).toHaveText("0");
     await expect
       .poll(() => page.evaluate(() => history.state))
       .toEqual({ screen: "external", nested: { kept: true } });

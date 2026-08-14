@@ -1,24 +1,20 @@
 import { createHistoryPort, type HistoryPort, type Sentinel } from "./history";
-import type {
-  BackAction,
-  BackAttempt,
-  BackGuard,
-  BackGuardOptions,
-  BackResolution,
-} from "./types";
+import type { BackAttempt, BackGuard, BackHandler } from "./types";
 
-const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime.v2");
+const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime.v3");
 const SENTINEL_REPLACED =
   "@revfanc/guard: the history sentinel was replaced.";
-const ACTION_COMMITTED =
-  "@revfanc/guard: a navigation action is already being committed.";
-const INVALID_RESOLVE =
-  "@revfanc/guard: resolve() accepts no arguments or one action function.";
+const BACK_COMMITTED =
+  "@revfanc/guard: a Back navigation is already being allowed.";
+const CLOSED = Symbol("closed");
 
-type Result = BackAction | null;
+type Outcome = typeof CLOSED | { error: unknown };
 type Layer = {
-  options: BackGuardOptions;
+  onBack: BackHandler;
   attempt?: BackAttempt;
+  outcome?: Outcome;
+  closed: Promise<Outcome>;
+  close(outcome: Outcome): void;
 };
 type Anchored = { phase: "anchored"; sentinel: Sentinel; layers: Layer[] };
 type Traversing = {
@@ -26,32 +22,39 @@ type Traversing = {
   sentinel: Sentinel;
   owner: Layer;
   restart: Layer[];
-  action: Result;
+  next: "restart" | "back";
 };
 type State = { phase: "idle" } | Anchored | Traversing;
 type RuntimeWindow = Window & { [RUNTIME_SYMBOL]?: WindowCoordinator };
 
-function handle(apply: (result: Result) => boolean): BackResolution {
-  function resolve(): boolean;
-  function resolve(action: BackAction): boolean;
-  function resolve(action?: BackAction): boolean {
-    if (arguments.length === 0) return apply(null);
-    if (arguments.length !== 1 || typeof action !== "function") {
-      throw new TypeError(INVALID_RESOLVE);
-    }
-    return apply(action);
-  }
-  return { resolve };
+function createLayer(onBack: BackHandler): Layer {
+  let close!: (outcome: Outcome) => void;
+  const closed = new Promise<Outcome>((resolve) => {
+    close = resolve;
+  });
+  return { onBack, closed, close };
+}
+
+function waitFor(layer: Layer): Promise<void> {
+  const result = layer.outcome
+    ? Promise.resolve(layer.outcome)
+    : layer.closed;
+  return result.then((outcome) => {
+    if (outcome !== CLOSED) throw outcome.error;
+  });
 }
 
 function invoke(
-  operation: () => void | PromiseLike<unknown>,
+  operation: () => void | PromiseLike<void>,
+  complete: () => void,
   fail: (error: unknown) => void,
 ): void {
   try {
     const result = operation();
     if (result && typeof result.then === "function") {
-      Promise.resolve(result).then(undefined, fail);
+      Promise.resolve(result).then(complete, fail);
+    } else {
+      complete();
     }
   } catch (error) {
     fail(error);
@@ -65,23 +68,25 @@ export class WindowCoordinator {
     history.listen((state, intercept) => this.onChange(state, intercept));
   }
 
-  add(options: BackGuardOptions): BackGuard {
-    const layer: Layer = { options };
+  add(onBack: BackHandler): BackGuard {
+    const layer = createLayer(onBack);
     const state = this.state;
 
     if (state.phase === "idle") {
       this.anchor([layer]);
     } else if (state.phase === "anchored") {
-      if (!this.owns(state)) {
-        throw new Error(SENTINEL_REPLACED);
+      if (!state.sentinel.isCurrent()) {
+        const error = new Error(SENTINEL_REPLACED);
+        this.fail(state.layers, error, false);
+        throw error;
       }
       state.layers.push(layer);
-    } else if (state.action) {
-      throw new Error(ACTION_COMMITTED);
+    } else if (state.next === "back") {
+      throw new Error(BACK_COMMITTED);
     } else {
       state.restart.push(layer);
     }
-    return handle((result) => this.resolveGuard(layer, result));
+    return { dispose: () => this.dispose(layer) };
   }
 
   private anchor(layers: Layer[]): void {
@@ -138,161 +143,160 @@ export class WindowCoordinator {
   ): void {
     if (!state.sentinel.isAtBase(eventState)) {
       this.fail(
-        state.restart,
+        [state.owner, ...state.restart],
         new Error("@revfanc/guard: sentinel cleanup missed its base."),
-        this.top(state.restart) ?? state.owner,
       );
       return;
     }
 
     intercept();
-    if (state.action) {
+    this.close(state.owner, CLOSED);
+    if (state.next === "back") {
       this.state = { phase: "idle" };
-      this.run(state.owner, state.action);
+      try {
+        this.history.back();
+      } catch (error) {
+        this.history.report(error);
+      }
     } else if (state.restart.length === 0) {
       this.state = { phase: "idle" };
     } else {
       try {
         this.anchor(state.restart);
       } catch (error) {
-        this.fail(state.restart, error, this.top(state.restart) ?? state.owner);
+        this.fail(state.restart, error);
       }
     }
   }
 
   private dispatch(layer: Layer): void {
-    const attempt: BackAttempt = handle((result) =>
-      this.resolveAttempt(layer, attempt, result),
-    );
+    const attempt: BackAttempt = {
+      allow: () => this.allow(layer, attempt),
+    };
     layer.attempt = attempt;
     invoke(
-      () => layer.options.onBack(attempt),
+      () => layer.onBack(attempt),
+      () => this.finishAttempt(layer, attempt),
       (error) => {
-        if (layer.attempt === attempt) layer.attempt = undefined;
-        this.report(layer, error);
+        this.finishAttempt(layer, attempt);
+        this.history.report(error);
       },
     );
   }
 
-  private resolveAttempt(
-    layer: Layer,
-    attempt: BackAttempt,
-    result: Result,
-  ): boolean {
+  private finishAttempt(layer: Layer, attempt: BackAttempt): void {
+    if (layer.attempt === attempt) layer.attempt = undefined;
+  }
+
+  private allow(layer: Layer, attempt: BackAttempt): boolean {
     const state = this.state;
     if (
       state.phase !== "anchored" ||
       this.top(state.layers) !== layer ||
       layer.attempt !== attempt ||
-      !this.owns(state, layer)
+      !this.owns(state)
     ) {
       return false;
     }
 
-    if (!result) {
-      layer.attempt = undefined;
-      return true;
-    }
-    return this.finishLayer(state, layer, state.layers.length - 1, result);
-  }
-
-  private resolveGuard(layer: Layer, result: Result): boolean {
-    const state = this.state;
-
-    if (state.phase === "traversing") {
-      const index = state.restart.indexOf(layer);
-      if (state.action || result || index < 0) return false;
-      layer.attempt = undefined;
-      state.restart.splice(index, 1);
-      return true;
-    }
-    if (state.phase !== "anchored") return false;
-
-    const index = state.layers.indexOf(layer);
-    if (index < 0 || !this.owns(state, layer)) return false;
-    if (result && this.top(state.layers) !== layer) return false;
-    return this.finishLayer(state, layer, index, result);
-  }
-
-  private finishLayer(
-    state: Anchored,
-    layer: Layer,
-    index: number,
-    result: Result,
-  ): boolean {
     if (state.layers.length === 1) {
-      return this.final(state, layer, result);
+      return this.traverse(state, layer, "back", true) === undefined;
     }
-    layer.attempt = undefined;
-    state.layers.splice(index, 1);
-    if (result) this.run(layer, result);
+    state.layers.pop();
+    this.close(layer, CLOSED);
     return true;
   }
 
-  private final(
+  private dispose(layer: Layer): Promise<void> {
+    if (layer.outcome) return waitFor(layer);
+    const state = this.state;
+
+    if (state.phase === "traversing") {
+      if (state.owner === layer) return waitFor(layer);
+      const index = state.restart.indexOf(layer);
+      if (index >= 0) {
+        state.restart.splice(index, 1);
+        this.close(layer, CLOSED);
+        return waitFor(layer);
+      }
+    } else if (state.phase === "anchored") {
+      const index = state.layers.indexOf(layer);
+      if (index >= 0) {
+        if (!state.sentinel.isCurrent()) {
+          const error = new Error(SENTINEL_REPLACED);
+          this.fail(state.layers, error, false);
+          return waitFor(layer);
+        }
+        if (state.layers.length > 1) {
+          state.layers.splice(index, 1);
+          this.close(layer, CLOSED);
+          return waitFor(layer);
+        }
+
+        const error = this.traverse(state, layer, "restart", false);
+        return error && !layer.outcome
+          ? Promise.reject(error)
+          : waitFor(layer);
+      }
+    }
+
+    const error = new Error("@revfanc/guard: the guard is no longer active.");
+    this.close(layer, { error });
+    return waitFor(layer);
+  }
+
+  private traverse(
     state: Anchored,
     layer: Layer,
-    result: Result,
-  ): boolean {
+    next: Traversing["next"],
+    reportFailure: boolean,
+  ): unknown | undefined {
     this.state = {
       phase: "traversing",
       sentinel: state.sentinel,
       owner: layer,
       restart: [],
-      action: result,
+      next,
     };
     try {
       state.sentinel.release();
     } catch (error) {
       if (state.sentinel.isCurrent()) {
         this.state = state;
-        this.report(layer, error);
       } else {
-        this.fail(state.layers, error, layer);
+        this.fail(state.layers, error, false);
       }
-      return false;
+      if (reportFailure) this.history.report(error);
+      return error;
     }
 
     layer.attempt = undefined;
-    return true;
+    return undefined;
   }
 
-  private owns(
-    state: Anchored,
-    reporter: Layer | undefined = this.top(state.layers),
-  ): boolean {
+  private owns(state: Anchored): boolean {
     if (state.sentinel.isCurrent()) return true;
-    this.fail(state.layers, new Error(SENTINEL_REPLACED), reporter);
+    this.fail(state.layers, new Error(SENTINEL_REPLACED));
     return false;
   }
 
-  private fail(
-    layers: Layer[],
-    error: unknown,
-    reporter: Layer | undefined = this.top(layers),
-  ): void {
-    for (const layer of layers) layer.attempt = undefined;
+  private close(layer: Layer, outcome: Outcome): void {
+    if (layer.outcome) return;
+    layer.attempt = undefined;
+    layer.outcome = outcome;
+    layer.close(outcome);
+  }
+
+  private fail(layers: Layer[], error: unknown, report = true): void {
+    for (const layer of layers) this.close(layer, { error });
     this.state = { phase: "idle" };
-    this.report(reporter, error);
-  }
-
-  private run(layer: Layer, action: BackAction): void {
-    invoke(action, (error) => this.report(layer, error));
-  }
-
-  private report(layer: Layer | undefined, error: unknown): void {
-    if (!layer?.options.onError) return this.history.report(error);
-    try {
-      layer.options.onError(error);
-    } catch (failure) {
-      this.history.report(failure);
-    }
+    if (report) this.history.report(error);
   }
 }
 
-export function createGuard(target: Window, options: BackGuardOptions): BackGuard {
+export function createGuard(target: Window, onBack: BackHandler): BackGuard {
   const runtimeTarget = target as RuntimeWindow;
   return (runtimeTarget[RUNTIME_SYMBOL] ||= new WindowCoordinator(
     createHistoryPort(target),
-  )).add(options);
+  )).add(onBack);
 }

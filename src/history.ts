@@ -17,6 +17,7 @@ export interface Sentinel {
 export interface HistoryPort {
   createSentinel(): Sentinel;
   listen(listener: (state: unknown, intercept: () => void) => void): void;
+  back(): void;
   report(error: unknown): void;
 }
 
@@ -153,6 +154,7 @@ export function createHistoryPort(target: Window): HistoryPort {
         true,
       );
     },
+    back: () => target.history.back(),
     report(error): void {
       const reportError = target.reportError;
       if (typeof reportError === "function") reportError.call(target, error);
