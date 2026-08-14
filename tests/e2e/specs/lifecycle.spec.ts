@@ -46,6 +46,28 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
   });
 
+  test("reload adopts the current sentinel without growing history", async ({ page }) => {
+    const length = await page.evaluate(() => history.length);
+    const marker = await page.evaluate(
+      () => history.state?.__revfanc_guard__,
+    );
+
+    for (let count = 0; count < 3; count += 1) {
+      await page.reload();
+      await expect(page.getByTestId("page")).toHaveText("Protected");
+      await expect.poll(() => page.evaluate(() => history.length)).toBe(length);
+      await expect
+        .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
+        .toBe(marker);
+    }
+
+    await requestBack(page);
+    await expect(page.getByTestId("a-attempts")).toHaveText("1");
+    await page.getByTestId("allow-attempt").dispatchEvent("click");
+    await expect(page.getByTestId("page")).toHaveText("Origin");
+    await expect(page).toHaveURL(/screen=origin/);
+  });
+
   test("100 dispose and recreate cycles do not grow history", async ({
     page,
     browserName,

@@ -12,12 +12,15 @@ export function mountVanillaFixture(): void {
     return;
   }
 
-  history.replaceState({ screen: "origin" }, "", "/?screen=origin");
+  const protectedAtLoad = screen === "protected";
+  if (!protectedAtLoad) {
+    history.replaceState({ screen: "origin" }, "", "/?screen=origin");
+  }
   root.innerHTML = `
     <main>
-      <h1 data-testid="page">Origin</h1>
-      <button data-testid="enter">Enter protected page</button>
-      <section data-testid="protected-controls" hidden>
+      <h1 data-testid="page">${protectedAtLoad ? "Protected" : "Origin"}</h1>
+      <button data-testid="enter"${protectedAtLoad ? " hidden" : ""}>Enter protected page</button>
+      <section data-testid="protected-controls"${protectedAtLoad ? "" : " hidden"}>
         <button data-testid="back">history.back()</button>
         <button data-testid="deny-attempt">Deny attempt</button>
         <button data-testid="allow-attempt">Allow attempt</button>
@@ -251,4 +254,6 @@ export function mountVanillaFixture(): void {
       query("page").textContent = "Origin";
     }
   });
+
+  if (protectedAtLoad) guardA = createA();
 }

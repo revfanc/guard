@@ -23,8 +23,17 @@ export interface HistoryPort {
 
 let sequence = 0;
 
-function ownMarker(value: object): PropertyDescriptor | undefined {
-  return Object.getOwnPropertyDescriptor(value, KEY);
+function createId(): string {
+  return `${Date.now().toString(36)}-${(++sequence).toString(36)}-${
+    Math.random().toString(36).slice(2) || "0"
+  }`;
+}
+
+function ownMarker(
+  value: object,
+  key = KEY,
+): PropertyDescriptor | undefined {
+  return Object.getOwnPropertyDescriptor(value, key);
 }
 
 function plain(value: unknown): value is Record<string, unknown> {
@@ -35,33 +44,60 @@ function plain(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function clean(value: unknown): value is Root {
+function clean(value: unknown, key: string): value is Root {
   return (
     value === null ||
-    (plain(value) && Object.isExtensible(value) && !ownMarker(value))
+    (plain(value) && Object.isExtensible(value) && !ownMarker(value, key))
   );
 }
 
-function assertClean(value: unknown): asserts value is Root {
+function assertRoot(value: unknown): asserts value is Root {
   if (value === null) return;
   if (!plain(value)) throw new TypeError(INVALID_STATE);
   if (!Object.isExtensible(value)) {
     throw new TypeError("@revfanc/guard: history.state must be extensible.");
   }
-  if (ownMarker(value)) {
-    throw new TypeError(`@revfanc/guard: history.state cannot contain ${KEY}.`);
+}
+
+function readMarker(
+  value: Record<string, unknown>,
+  key: string,
+): { encoded: string; id: string; key: string } | undefined {
+  const descriptor = ownMarker(value, key);
+  if (!descriptor?.configurable || typeof descriptor.value !== "string") {
+    return undefined;
   }
+  const match = /^1:[no]:([a-z0-9]+-[a-z0-9]+-[a-z0-9]+)$/.exec(
+    descriptor.value,
+  );
+  const id = match?.[1];
+  if (!id || (key !== KEY && key !== `${KEY}:${id}`)) return undefined;
+  return { encoded: descriptor.value, id, key };
+}
+
+function existingMarker(
+  value: unknown,
+): { encoded: string; id: string; key: string } | undefined {
+  if (!plain(value) || !Object.isExtensible(value)) return undefined;
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (key.startsWith(`${KEY}:`)) {
+      const marker = readMarker(value, key);
+      if (marker) return marker;
+    }
+  }
+  return readMarker(value, KEY);
 }
 
 function writeMarked(
   history: History,
   method: "pushState" | "replaceState",
   state: Root,
+  key: string,
   encoded: string,
   url: string,
 ): void {
   const value = state ?? {};
-  Object.defineProperty(value, KEY, {
+  Object.defineProperty(value, key, {
     configurable: true,
     enumerable: true,
     value: encoded,
@@ -70,25 +106,31 @@ function writeMarked(
   try {
     history[method](value, "", url);
   } finally {
-    if (state) delete state[KEY];
+    if (state) delete state[key];
   }
 }
 
 function makeSentinel(target: Window): Sentinel {
   const state: unknown = target.history.state;
-  assertClean(state);
-  const id = `${Date.now().toString(36)}-${(++sequence).toString(36)}-${
-    Math.random().toString(36).slice(2) || "0"
-  }`;
+  const existing = existingMarker(state);
+  assertRoot(state);
+  let id = existing?.id ?? createId();
+  let key = existing?.key ?? KEY;
+  while (!existing && state !== null && ownMarker(state, key)) {
+    id = createId();
+    key = `${KEY}:${id}`;
+  }
   const url = target.location.href;
-  let encoded = `1:${state === null ? "n" : "o"}:${id}`;
-  writeMarked(target.history, "pushState", state, encoded, url);
+  let encoded = existing?.encoded ?? `1:${state === null ? "n" : "o"}:${id}`;
+  if (!existing) {
+    writeMarked(target.history, "pushState", state, key, encoded, url);
+  }
   const { history, location } = target;
   const sameUrl = (): boolean => location.href === url;
   const matches = (state: unknown): boolean =>
-    plain(state) && ownMarker(state)?.value === encoded;
+    plain(state) && ownMarker(state, key)?.value === encoded;
   const isAtBase = (state: unknown): boolean =>
-    sameUrl() && clean(state) && clean(history.state);
+    sameUrl() && clean(state, key) && clean(history.state, key);
 
   return {
     matches,
@@ -97,21 +139,21 @@ function makeSentinel(target: Window): Sentinel {
     restore(state): void {
       if (!isAtBase(state)) throw new Error(REPLACED);
       const current: unknown = history.state;
-      assertClean(current);
+      assertRoot(current);
       const next = `1:${current === null ? "n" : "o"}:${id}`;
-      writeMarked(history, "pushState", current, next, url);
+      writeMarked(history, "pushState", current, key, next, url);
       encoded = next;
     },
     release(): void {
       const state: unknown = history.state;
       if (!sameUrl() || !plain(state)) throw new Error(REPLACED);
-      const descriptor = ownMarker(state);
+      const descriptor = ownMarker(state, key);
       if (descriptor?.value !== encoded) throw new Error(REPLACED);
       if (!Object.isExtensible(state)) {
         throw new Error(NOT_EDITABLE);
       }
 
-      if (!descriptor.configurable || !delete state[KEY]) {
+      if (!descriptor.configurable || !delete state[key]) {
         throw new Error(NOT_EDITABLE);
       }
       const base =
@@ -121,7 +163,7 @@ function makeSentinel(target: Window): Sentinel {
       try {
         history.replaceState(base, "", url);
       } catch (error) {
-        Object.defineProperty(state, KEY, descriptor);
+        Object.defineProperty(state, key, descriptor);
         throw error;
       }
 
@@ -129,9 +171,9 @@ function makeSentinel(target: Window): Sentinel {
       try {
         history.back();
       } catch (error) {
-        if (sameUrl() && history.state === cleared && clean(cleared)) {
+        if (sameUrl() && history.state === cleared && clean(cleared, key)) {
           try {
-            writeMarked(history, "replaceState", cleared, encoded, url);
+            writeMarked(history, "replaceState", cleared, key, encoded, url);
           } catch {
             // The coordinator detects failed rollback through isCurrent().
           }

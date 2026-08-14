@@ -144,13 +144,65 @@ describe("HistoryPort", () => {
     expect(getter).not.toHaveBeenCalled();
   });
 
+  it("adopts a current sentinel without pushing another entry", () => {
+    const port = createHistoryPort(target());
+    const first = port.createSentinel();
+    const marker = (target().history.state as Record<string, unknown>)[STATE_KEY];
+    const length = target().history.length;
+    const pushState = vi.mocked(target().history.pushState);
+    const calls = pushState.mock.calls.length;
+
+    const adopted = createHistoryPort(target()).createSentinel();
+
+    expect(first.isCurrent()).toBe(true);
+    expect(adopted.isCurrent()).toBe(true);
+    expect(target().history.length).toBe(length);
+    expect(pushState).toHaveBeenCalledTimes(calls);
+    expect((target().history.state as Record<string, unknown>)[STATE_KEY]).toBe(
+      marker,
+    );
+  });
+
+  it("preserves a conflicting reserved field and uses a fallback marker", () => {
+    const application = { owned: true };
+    target().history.replaceState(
+      { route: "editor", [STATE_KEY]: application },
+      "",
+      target().location.href,
+    );
+
+    const sentinel = createHistoryPort(target()).createSentinel();
+    const current = target().history.state as Record<string, unknown>;
+    const fallback = Object.keys(current).find((key) =>
+      key.startsWith(`${STATE_KEY}:`),
+    );
+
+    expect(current[STATE_KEY]).toEqual(application);
+    expect(fallback).toBeDefined();
+    expect(sentinel.isCurrent()).toBe(true);
+
+    const length = target().history.length;
+    const pushState = vi.mocked(target().history.pushState);
+    const calls = pushState.mock.calls.length;
+    const adopted = createHistoryPort(target()).createSentinel();
+    expect(adopted.isCurrent()).toBe(true);
+    expect(target().history.length).toBe(length);
+    expect(pushState).toHaveBeenCalledTimes(calls);
+
+    vi.spyOn(target().history, "back").mockImplementation(() => undefined);
+    adopted.release();
+    expect(target().history.state).toEqual({
+      route: "editor",
+      [STATE_KEY]: application,
+    });
+  });
+
   it.each([
     1,
     "state",
     [],
     new Date(),
-    { [STATE_KEY]: { application: true } },
-  ])("rejects an unsupported or reserved root before pushing %#", (state) => {
+  ])("rejects an unsupported root before pushing %#", (state) => {
     target().history.replaceState(state, "", target().location.href);
     const pushState = vi.mocked(target().history.pushState);
     const calls = pushState.mock.calls.length;

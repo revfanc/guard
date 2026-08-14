@@ -11,7 +11,7 @@
 
 ## 不保证处理
 
-- 刷新、关闭标签页、`beforeunload`。
+- 拦截刷新、关闭标签页、`beforeunload`。
 - 地址栏、普通链接和跨文档导航。
 - 长按返回后选择任意历史记录。
 - `history.go(-2)` 等跨多条记录跳转。
@@ -28,9 +28,11 @@
 首次创建 Guard 时，`history.state` 必须是：
 
 - `null`；或
-- 可扩展的普通对象，并且没有保留字段 `__revfanc_guard__`。
+- 可扩展的普通对象。
 
-primitive、数组、`Map`、`Set`、类实例、冻结/密封/不可扩展对象及已包含保留字段的对象会同步抛错。
+primitive、数组、`Map`、`Set`、类实例、冻结/密封/不可扩展对象会同步抛错。业务已有的同名字段会被保留，库改用独立的备用 marker 字段。
+
+刷新不会被 Guard 拦截。刷新后旧 handler 和 Guard 栈已经消失；应用重新调用 `createBackGuard()` 时，库会接管当前兼容 sentinel，不再调用 `pushState`。应用仍需按原顺序重建所需 Guard。
 
 库依靠浏览器原生 structured clone 创建 sentinel，因此合法 state 中的业务字段、共享引用和循环引用由浏览器复制。最后一个 Guard `dispose()` 时，库清除 marker、保留业务 state 与 URL，再遍历回受保护 base。History API 无法删除历史项，因此不承诺恢复 `history.length`。
 

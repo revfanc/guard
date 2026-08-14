@@ -47,12 +47,13 @@ Supported:
 - native, same-document `history.back()` and `history.go(-1)` attempts;
 - asynchronous decisions without duplicate handler calls;
 - LIFO guards and disposal of any guard layer;
+- sentinel adoption when the application recreates its guards after reload;
 - queued teardown/recreation while sentinel cleanup is in progress.
 
 Not guaranteed:
 
 - Vue Router, React Router, or another router's POP behavior and listener order;
-- reload, tab close, address-bar, or cross-document navigation;
+- blocking reload, tab close, address-bar, or cross-document navigation;
 - long-press history selection, `history.go(-N)`, or queued rapid Back requests;
 - forward navigation or external `pushState` / `replaceState` while active.
 

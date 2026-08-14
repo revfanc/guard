@@ -20,7 +20,7 @@ const guard = createBackGuard(async (attempt) => {
 })
 ```
 
-创建时会增加一条同 URL sentinel。用户单步返回后，库恢复保护并调用 handler：
+首次创建时会增加一条同 URL sentinel；刷新后重新创建 Guard 会直接接管当前兼容 sentinel。用户单步返回后，库恢复保护并调用 handler：
 
 - 调用 `attempt.allow()`：同意这次返回；最后一层会自动继续原始 Back。
 - handler 完成但没有调用 `allow()`：留在页面并重新等待下一次返回。

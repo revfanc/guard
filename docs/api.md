@@ -10,7 +10,7 @@ type BackHandler = (
 ) => void | PromiseLike<void>
 ```
 
-在当前页面创建一层 Back Guard。首次创建会立即增加一条同 URL 哨兵记录；如果上一代正在执行 `dispose()` 清理，新 Guard 会排队，直到内部遍历回到 base 后再激活。
+在当前页面创建一层 Back Guard。首次创建会增加一条同 URL 哨兵记录；刷新后的新运行时如果发现兼容的当前 sentinel，会直接接管而不重复增加记录。如果上一代正在执行 `dispose()` 清理，新 Guard 会排队，直到内部遍历回到 base 后再激活。
 
 非浏览器环境、History API 不完整、handler 不是函数或当前 `history.state` 不符合契约时同步抛错。
 
