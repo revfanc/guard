@@ -26,9 +26,9 @@ function installStructuredCloneHistory(): void {
   });
 }
 
-function nextChange(port: HistoryPort): Promise<unknown> {
+function nextChange(port: HistoryPort): Promise<void> {
   return new Promise((resolve) => {
-    port.listen(resolve);
+    port.listenToPopState(() => resolve());
   });
 }
 
@@ -45,7 +45,7 @@ afterEach(() => {
 });
 
 describe("HistoryPort", () => {
-  it("creates and releases a same-URL sentinel without changing the graph", () => {
+  it("creates and releases a same-URL sentinel with business state", () => {
     const state: Record<string, unknown> = { route: "editor" };
     const shared: Record<string, unknown> = { draft: true };
     state.self = state;
@@ -61,15 +61,15 @@ describe("HistoryPort", () => {
 
     expect(target().history.length).toBe(initialLength + 1);
     expect(target().location.href).toBe(initialUrl);
-    expect(sentinel.matches(current)).toBe(true);
     expect(sentinel.isCurrent()).toBe(true);
-    expect(sentinel.isAtBase(current)).toBe(false);
+    expect(sentinel.isAtBase()).toBe(false);
+    expect(current[STATE_KEY]).toBe(false);
     expect(current.self).toBe(current);
     expect(current.left).toBe(current.right);
     expect(state).not.toHaveProperty(STATE_KEY);
 
     const back = vi.spyOn(target().history, "back").mockImplementation(() => undefined);
-    sentinel.release();
+    sentinel.releaseToBase();
     const clean = target().history.state as Record<string, unknown>;
 
     expect(back).toHaveBeenCalledOnce();
@@ -79,12 +79,38 @@ describe("HistoryPort", () => {
     expect(sentinel.isCurrent()).toBe(false);
   });
 
+  it("preserves an own __proto__ business field", () => {
+    const state: Record<string, unknown> = { route: "editor" };
+    Object.defineProperty(state, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      value: { kept: true },
+      writable: true,
+    });
+    target().history.replaceState(state, "", target().location.href);
+
+    const sentinel = createHistoryPort(target()).createSentinel();
+    const current = target().history.state as Record<string, unknown>;
+
+    expect(Object.prototype.hasOwnProperty.call(current, "__proto__")).toBe(
+      true,
+    );
+    expect(current["__proto__"]).toEqual({ kept: true });
+
+    vi.spyOn(target().history, "back").mockImplementation(() => undefined);
+    sentinel.releaseToBase();
+    const clean = target().history.state as Record<string, unknown>;
+
+    expect(Object.prototype.hasOwnProperty.call(clean, "__proto__")).toBe(true);
+    expect(clean["__proto__"]).toEqual({ kept: true });
+  });
+
   it("restores null exactly when the sentinel has no business fields", () => {
     expect(target().history.state).toBeNull();
 
     const sentinel = createHistoryPort(target()).createSentinel();
     vi.spyOn(target().history, "back").mockImplementation(() => undefined);
-    sentinel.release();
+    sentinel.releaseToBase();
 
     expect(target().history.state).toBeNull();
     expect(sentinel.isCurrent()).toBe(false);
@@ -97,7 +123,7 @@ describe("HistoryPort", () => {
     target().history.replaceState(current, "", target().location.href);
     vi.spyOn(target().history, "back").mockImplementation(() => undefined);
 
-    sentinel.release();
+    sentinel.releaseToBase();
 
     expect(target().history.state).toEqual({ route: "external" });
   });
@@ -107,41 +133,22 @@ describe("HistoryPort", () => {
     const sentinel = port.createSentinel();
     const changed = nextChange(port);
 
-    sentinel.release();
-    const change = await changed;
+    sentinel.releaseToBase();
+    await changed;
 
-    expect(sentinel.isAtBase(change)).toBe(true);
+    expect(sentinel.isAtBase()).toBe(true);
     target().history.replaceState(
       { route: "latest", nested: { saved: true } },
       "",
       target().location.href,
     );
-    sentinel.restore(change);
+    sentinel.restoreAtBase();
 
     expect(sentinel.isCurrent()).toBe(true);
     expect(target().history.state).toMatchObject({
       route: "latest",
       nested: { saved: true },
     });
-  });
-
-  it("does not treat foreign, malformed, or accessor markers as its own", () => {
-    const sentinel = createHistoryPort(target()).createSentinel();
-    const current = target().history.state as Record<string, unknown>;
-    const marker = String(current[STATE_KEY]);
-    const getter = vi.fn(() => marker);
-    const accessorState: Record<string, unknown> = {};
-    Object.defineProperty(accessorState, STATE_KEY, {
-      configurable: true,
-      enumerable: true,
-      get: getter,
-    });
-
-    expect(sentinel.matches({ [STATE_KEY]: marker.replace(":n:", ":o:") })).toBe(false);
-    expect(sentinel.matches({ [STATE_KEY]: "malformed" })).toBe(false);
-    expect(sentinel.matches(accessorState)).toBe(false);
-    expect(sentinel.isAtBase(accessorState)).toBe(false);
-    expect(getter).not.toHaveBeenCalled();
   });
 
   it("adopts a current sentinel without pushing another entry", () => {
@@ -161,40 +168,7 @@ describe("HistoryPort", () => {
     expect((target().history.state as Record<string, unknown>)[STATE_KEY]).toBe(
       marker,
     );
-  });
-
-  it("preserves a conflicting reserved field and uses a fallback marker", () => {
-    const application = { owned: true };
-    target().history.replaceState(
-      { route: "editor", [STATE_KEY]: application },
-      "",
-      target().location.href,
-    );
-
-    const sentinel = createHistoryPort(target()).createSentinel();
-    const current = target().history.state as Record<string, unknown>;
-    const fallback = Object.keys(current).find((key) =>
-      key.startsWith(`${STATE_KEY}:`),
-    );
-
-    expect(current[STATE_KEY]).toEqual(application);
-    expect(fallback).toBeDefined();
-    expect(sentinel.isCurrent()).toBe(true);
-
-    const length = target().history.length;
-    const pushState = vi.mocked(target().history.pushState);
-    const calls = pushState.mock.calls.length;
-    const adopted = createHistoryPort(target()).createSentinel();
-    expect(adopted.isCurrent()).toBe(true);
-    expect(target().history.length).toBe(length);
-    expect(pushState).toHaveBeenCalledTimes(calls);
-
-    vi.spyOn(target().history, "back").mockImplementation(() => undefined);
-    adopted.release();
-    expect(target().history.state).toEqual({
-      route: "editor",
-      [STATE_KEY]: application,
-    });
+    expect(marker).toBe(true);
   });
 
   it.each([
@@ -211,16 +185,37 @@ describe("HistoryPort", () => {
     expect(pushState).toHaveBeenCalledTimes(calls);
   });
 
-  it("rejects a non-extensible plain-object root before pushing", () => {
+  it("copies a non-extensible plain-object root", () => {
     target().history.replaceState({ route: "editor" }, "", target().location.href);
-    Object.freeze(target().history.state);
+    const state = target().history.state as Record<string, unknown>;
+    Object.freeze(state);
     const pushState = vi.mocked(target().history.pushState);
     const calls = pushState.mock.calls.length;
 
-    expect(() => createHistoryPort(target()).createSentinel()).toThrow(
-      "history.state must be extensible",
-    );
-    expect(pushState).toHaveBeenCalledTimes(calls);
+    const sentinel = createHistoryPort(target()).createSentinel();
+
+    expect(sentinel.isCurrent()).toBe(true);
+    expect(state).toEqual({ route: "editor" });
+    expect(pushState).toHaveBeenCalledTimes(calls + 1);
+    expect(target().history.state).toEqual({
+      route: "editor",
+      [STATE_KEY]: false,
+    });
+  });
+
+  it("releases a frozen sentinel without changing its state graph", () => {
+    const state: Record<string, unknown> = { route: "editor" };
+    state.self = state;
+    target().history.replaceState(state, "", target().location.href);
+    const sentinel = createHistoryPort(target()).createSentinel();
+    Object.freeze(target().history.state);
+    vi.spyOn(target().history, "back").mockImplementation(() => undefined);
+
+    sentinel.releaseToBase();
+    const clean = target().history.state as Record<string, unknown>;
+
+    expect(clean).not.toHaveProperty(STATE_KEY);
+    expect(clean.self).toBe(clean);
   });
 
   it("does not leak its reserved key when pushState fails", () => {
@@ -235,14 +230,14 @@ describe("HistoryPort", () => {
     expect(target().history.state).not.toHaveProperty(STATE_KEY);
   });
 
-  it("restores the marker in memory when clear replaceState fails", () => {
+  it("keeps the current sentinel when clear replaceState fails", () => {
     const sentinel = createHistoryPort(target()).createSentinel();
     const failure = new Error("replace failed");
     vi.mocked(target().history.replaceState).mockImplementationOnce(() => {
       throw failure;
     });
 
-    expect(() => sentinel.release()).toThrow(failure);
+    expect(() => sentinel.releaseToBase()).toThrow(failure);
     expect(sentinel.isCurrent()).toBe(true);
   });
 
@@ -252,21 +247,33 @@ describe("HistoryPort", () => {
     target().history.replaceState(external, "", "/external#kept");
 
     expect(sentinel.isCurrent()).toBe(false);
-    expect(() => sentinel.release()).toThrow("sentinel was replaced");
+    expect(() => sentinel.releaseToBase()).toThrow("sentinel was replaced");
     expect(target().location.href).toBe("https://example.test/external#kept");
     expect(target().history.state).toEqual(external);
   });
 
-  it("rolls back its marker when history.back throws synchronously", () => {
+  it("does not restore over an externally replaced sentinel", () => {
+    const sentinel = createHistoryPort(target()).createSentinel();
+    const external = { route: "external" };
+    target().history.replaceState(external, "", "/external");
+
+    expect(sentinel.isAtBase()).toBe(false);
+    expect(() => sentinel.restoreAtBase()).toThrow("sentinel was replaced");
+    expect(target().history.state).toEqual(external);
+    expect(target().location.href).toBe("https://example.test/external");
+  });
+
+  it("fails closed when history.back throws synchronously", () => {
     const sentinel = createHistoryPort(target()).createSentinel();
     const failure = new Error("back failed");
     vi.spyOn(target().history, "back").mockImplementation(() => {
       throw failure;
     });
 
-    expect(() => sentinel.release()).toThrow(failure);
+    expect(() => sentinel.releaseToBase()).toThrow(failure);
 
-    expect(sentinel.isCurrent()).toBe(true);
+    expect(sentinel.isCurrent()).toBe(false);
+    expect(target().history.state).toBeNull();
   });
 
   it("does not roll back over state replaced by a throwing back call", () => {
@@ -277,32 +284,19 @@ describe("HistoryPort", () => {
       throw new Error("back failed after replacement");
     });
 
-    expect(() => sentinel.release()).toThrow("back failed after replacement");
+    expect(() => sentinel.releaseToBase()).toThrow(
+      "back failed after replacement",
+    );
     expect(target().history.state).toEqual(external);
     expect(target().location.href).toBe("https://example.test/external");
-  });
-
-  it("fails closed if marker rollback itself throws", () => {
-    const sentinel = createHistoryPort(target()).createSentinel();
-    const failure = new Error("back failed");
-    vi.spyOn(target().history, "back").mockImplementation(() => {
-      vi.mocked(target().history.replaceState).mockImplementationOnce(() => {
-        throw new Error("rollback failed");
-      });
-      throw failure;
-    });
-
-    expect(() => sentinel.release()).toThrow(failure);
-    expect(sentinel.isCurrent()).toBe(false);
-    expect(target().history.state).toBeNull();
   });
 
   it("encapsulates popstate interception", () => {
     const port = createHistoryPort(target());
     const observed = vi.fn();
     const later = vi.fn();
-    port.listen((state, intercept) => {
-      observed(state);
+    port.listenToPopState((intercept) => {
+      observed();
       intercept();
     });
     target().addEventListener("popstate", later);
@@ -310,22 +304,9 @@ describe("HistoryPort", () => {
     target().dispatchEvent(
       new dom.window.PopStateEvent("popstate", { state: { route: "base" } }),
     );
-    expect(observed).toHaveBeenCalledWith({ route: "base" });
+    expect(observed).toHaveBeenCalledOnce();
     expect(later).not.toHaveBeenCalled();
 
   });
 
-  it("reports through the target window when a reporter is available", () => {
-    const reportError = vi.fn();
-    Object.defineProperty(target(), "reportError", {
-      configurable: true,
-      value: reportError,
-    });
-    const error = new Error("reported");
-
-    createHistoryPort(target()).report(error);
-
-    expect(reportError).toHaveBeenCalledOnce();
-    expect(reportError).toHaveBeenCalledWith(error);
-  });
 });

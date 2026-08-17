@@ -34,5 +34,5 @@ const guard = createBackGuard(async (attempt) => {
 ```
 
 ::: warning 它不是浏览器级锁
-只保证协调原生、同文档、逐次单步 Back。刷新本身不会被拦截，但重新创建 Guard 时会接管当前兼容 sentinel。Router POP、关闭、地址栏、跨文档、跨多步跳转和一次 traversal 完成前排队的多次 Back 不在保证范围内。
+只保证协调原生、同文档、逐次单步 Back。刷新本身不会被拦截，但重新创建 Guard 时会接管当前 sentinel。Router POP、关闭、地址栏、跨文档、跨多步跳转和一次 traversal 完成前排队的多次 Back 不在保证范围内。
 :::

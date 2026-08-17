@@ -1,4 +1,8 @@
-import { createHistoryPort, type HistoryPort, type Sentinel } from "./history";
+import {
+  createHistoryPort,
+  type HistoryPort,
+  type HistorySentinel,
+} from "./history";
 import type { BackAttempt, BackGuard, BackHandler } from "./types";
 
 const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime.v3");
@@ -16,16 +20,34 @@ type Layer = {
   closed: Promise<Outcome>;
   close(outcome: Outcome): void;
 };
-type Anchored = { phase: "anchored"; sentinel: Sentinel; layers: Layer[] };
+type Armed = {
+  phase: "armed";
+  sentinel: HistorySentinel;
+  layers: Layer[];
+};
 type Traversing = {
   phase: "traversing";
-  sentinel: Sentinel;
+  sentinel: HistorySentinel;
   owner: Layer;
   restart: Layer[];
   next: "restart" | "back";
 };
-type State = { phase: "idle" } | Anchored | Traversing;
+type State = Armed | Traversing;
 type RuntimeWindow = Window & { [RUNTIME_SYMBOL]?: WindowCoordinator };
+type ErrorReporter = (error: unknown) => void;
+
+function createErrorReporter(target: Window): ErrorReporter {
+  return (error) => {
+    const reportError = target.reportError;
+    if (typeof reportError === "function") {
+      reportError.call(target, error);
+    } else {
+      void Promise.resolve().then(() => {
+        throw error;
+      });
+    }
+  };
+}
 
 function createLayer(onBack: BackHandler): Layer {
   let close!: (outcome: Outcome) => void;
@@ -36,45 +58,28 @@ function createLayer(onBack: BackHandler): Layer {
 }
 
 function waitFor(layer: Layer): Promise<void> {
-  const result = layer.outcome
-    ? Promise.resolve(layer.outcome)
-    : layer.closed;
-  return result.then((outcome) => {
+  return layer.closed.then((outcome) => {
     if (outcome !== CLOSED) throw outcome.error;
   });
 }
 
-function invoke(
-  operation: () => void | PromiseLike<void>,
-  complete: () => void,
-  fail: (error: unknown) => void,
-): void {
-  try {
-    const result = operation();
-    if (result && typeof result.then === "function") {
-      Promise.resolve(result).then(complete, fail);
-    } else {
-      complete();
-    }
-  } catch (error) {
-    fail(error);
-  }
-}
-
 export class WindowCoordinator {
-  private state: State = { phase: "idle" };
+  private state?: State;
 
-  constructor(private readonly history: HistoryPort) {
-    history.listen((state, intercept) => this.onChange(state, intercept));
+  constructor(
+    private readonly history: HistoryPort,
+    private readonly reportError: ErrorReporter,
+  ) {
+    history.listenToPopState((intercept) => this.onPopState(intercept));
   }
 
   add(onBack: BackHandler): BackGuard {
     const layer = createLayer(onBack);
     const state = this.state;
 
-    if (state.phase === "idle") {
-      this.anchor([layer]);
-    } else if (state.phase === "anchored") {
+    if (!state) {
+      this.arm([layer]);
+    } else if (state.phase === "armed") {
       if (!state.sentinel.isCurrent()) {
         const error = new Error(SENTINEL_REPLACED);
         this.fail(state.layers, error, false);
@@ -89,9 +94,9 @@ export class WindowCoordinator {
     return { dispose: () => this.dispose(layer) };
   }
 
-  private anchor(layers: Layer[]): void {
+  private arm(layers: Layer[]): void {
     this.state = {
-      phase: "anchored",
+      phase: "armed",
       sentinel: this.history.createSentinel(),
       layers,
     };
@@ -101,68 +106,49 @@ export class WindowCoordinator {
     return layers[layers.length - 1];
   }
 
-  private onChange(eventState: unknown, intercept: () => void): void {
-    const current = this.state;
-    if (current.phase === "anchored") {
-      this.onBack(current, eventState, intercept);
-    } else if (current.phase === "traversing") {
-      this.onTraversed(current, eventState, intercept);
-    }
-  }
-
-  private onBack(
-    state: Anchored,
-    eventState: unknown,
-    intercept: () => void,
-  ): void {
-    if (state.sentinel.matches(eventState)) return;
-    if (!state.sentinel.isAtBase(eventState)) {
+  private onPopState(intercept: () => void): void {
+    const state = this.state;
+    if (!state) return;
+    const armed = state.phase === "armed";
+    const layers = armed ? state.layers : [state.owner, ...state.restart];
+    if (!state.sentinel.isAtBase()) {
       this.fail(
-        state.layers,
-        new Error("@revfanc/guard: back navigation missed the guarded base."),
+        layers,
+        new Error(
+          armed
+            ? "@revfanc/guard: back navigation missed the guarded base."
+            : "@revfanc/guard: sentinel cleanup missed its base.",
+        ),
       );
       return;
     }
 
     intercept();
-    try {
-      state.sentinel.restore(eventState);
-    } catch (error) {
-      this.fail(state.layers, error);
+    if (armed) {
+      try {
+        state.sentinel.restoreAtBase();
+      } catch (error) {
+        this.fail(state.layers, error);
+        return;
+      }
+      const layer = this.top(state.layers);
+      if (layer && !layer.attempt) this.dispatch(layer);
       return;
     }
 
-    const layer = this.top(state.layers);
-    if (layer && !layer.attempt) this.dispatch(layer);
-  }
-
-  private onTraversed(
-    state: Traversing,
-    eventState: unknown,
-    intercept: () => void,
-  ): void {
-    if (!state.sentinel.isAtBase(eventState)) {
-      this.fail(
-        [state.owner, ...state.restart],
-        new Error("@revfanc/guard: sentinel cleanup missed its base."),
-      );
-      return;
-    }
-
-    intercept();
     this.close(state.owner, CLOSED);
     if (state.next === "back") {
-      this.state = { phase: "idle" };
+      this.state = undefined;
       try {
         this.history.back();
       } catch (error) {
-        this.history.report(error);
+        this.reportError(error);
       }
     } else if (state.restart.length === 0) {
-      this.state = { phase: "idle" };
+      this.state = undefined;
     } else {
       try {
-        this.anchor(state.restart);
+        this.arm(state.restart);
       } catch (error) {
         this.fail(state.restart, error);
       }
@@ -173,25 +159,31 @@ export class WindowCoordinator {
     const attempt: BackAttempt = {
       allow: () => this.allow(layer, attempt),
     };
+    const finish = (): void => {
+      if (layer.attempt === attempt) layer.attempt = undefined;
+    };
+    const fail = (error: unknown): void => {
+      finish();
+      this.reportError(error);
+    };
     layer.attempt = attempt;
-    invoke(
-      () => layer.onBack(attempt),
-      () => this.finishAttempt(layer, attempt),
-      (error) => {
-        this.finishAttempt(layer, attempt);
-        this.history.report(error);
-      },
-    );
-  }
-
-  private finishAttempt(layer: Layer, attempt: BackAttempt): void {
-    if (layer.attempt === attempt) layer.attempt = undefined;
+    try {
+      const result = layer.onBack(attempt);
+      if (result && typeof result.then === "function") {
+        Promise.resolve(result).then(finish, fail);
+      } else {
+        finish();
+      }
+    } catch (error) {
+      fail(error);
+    }
   }
 
   private allow(layer: Layer, attempt: BackAttempt): boolean {
     const state = this.state;
     if (
-      state.phase !== "anchored" ||
+      !state ||
+      state.phase !== "armed" ||
       this.top(state.layers) !== layer ||
       layer.attempt !== attempt ||
       !this.owns(state)
@@ -200,7 +192,7 @@ export class WindowCoordinator {
     }
 
     if (state.layers.length === 1) {
-      return this.traverse(state, layer, "back", true) === undefined;
+      return this.traverse(state, layer, "back", true);
     }
     state.layers.pop();
     this.close(layer, CLOSED);
@@ -211,7 +203,7 @@ export class WindowCoordinator {
     if (layer.outcome) return waitFor(layer);
     const state = this.state;
 
-    if (state.phase === "traversing") {
+    if (state?.phase === "traversing") {
       if (state.owner === layer) return waitFor(layer);
       const index = state.restart.indexOf(layer);
       if (index >= 0) {
@@ -219,7 +211,7 @@ export class WindowCoordinator {
         this.close(layer, CLOSED);
         return waitFor(layer);
       }
-    } else if (state.phase === "anchored") {
+    } else if (state?.phase === "armed") {
       const index = state.layers.indexOf(layer);
       if (index >= 0) {
         if (!state.sentinel.isCurrent()) {
@@ -233,10 +225,8 @@ export class WindowCoordinator {
           return waitFor(layer);
         }
 
-        const error = this.traverse(state, layer, "restart", false);
-        return error && !layer.outcome
-          ? Promise.reject(error)
-          : waitFor(layer);
+        this.traverse(state, layer, "restart", false);
+        return waitFor(layer);
       }
     }
 
@@ -246,11 +236,11 @@ export class WindowCoordinator {
   }
 
   private traverse(
-    state: Anchored,
+    state: Armed,
     layer: Layer,
     next: Traversing["next"],
     reportFailure: boolean,
-  ): unknown | undefined {
+  ): boolean {
     this.state = {
       phase: "traversing",
       sentinel: state.sentinel,
@@ -259,22 +249,18 @@ export class WindowCoordinator {
       next,
     };
     try {
-      state.sentinel.release();
+      state.sentinel.releaseToBase();
     } catch (error) {
-      if (state.sentinel.isCurrent()) {
-        this.state = state;
-      } else {
-        this.fail(state.layers, error, false);
-      }
-      if (reportFailure) this.history.report(error);
-      return error;
+      this.fail(state.layers, error, false);
+      if (reportFailure) this.reportError(error);
+      return false;
     }
 
     layer.attempt = undefined;
-    return undefined;
+    return true;
   }
 
-  private owns(state: Anchored): boolean {
+  private owns(state: Armed): boolean {
     if (state.sentinel.isCurrent()) return true;
     this.fail(state.layers, new Error(SENTINEL_REPLACED));
     return false;
@@ -289,8 +275,8 @@ export class WindowCoordinator {
 
   private fail(layers: Layer[], error: unknown, report = true): void {
     for (const layer of layers) this.close(layer, { error });
-    this.state = { phase: "idle" };
-    if (report) this.history.report(error);
+    this.state = undefined;
+    if (report) this.reportError(error);
   }
 }
 
@@ -298,5 +284,6 @@ export function createGuard(target: Window, onBack: BackHandler): BackGuard {
   const runtimeTarget = target as RuntimeWindow;
   return (runtimeTarget[RUNTIME_SYMBOL] ||= new WindowCoordinator(
     createHistoryPort(target),
+    createErrorReporter(target),
   )).add(onBack);
 }

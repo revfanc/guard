@@ -38,7 +38,7 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("decision")).toHaveText("recreate:done");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toEqual(expect.any(String));
+      .toEqual(expect.any(Boolean));
     await expect.poll(() => page.evaluate(() => history.length)).toBe(length);
 
     await requestBack(page);

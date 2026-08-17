@@ -80,7 +80,7 @@ test.describe("Back decisions", () => {
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toEqual(expect.any(String));
+      .toEqual(expect.any(Boolean));
     await requestBack(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
     await expect(page.getByTestId("page")).toHaveText("Protected");

@@ -10,7 +10,7 @@ type BackHandler = (
 ) => void | PromiseLike<void>
 ```
 
-在当前页面创建一层 Back Guard。首次创建会增加一条同 URL 哨兵记录；刷新后的新运行时如果发现兼容的当前 sentinel，会直接接管而不重复增加记录。如果上一代正在执行 `dispose()` 清理，新 Guard 会排队，直到内部遍历回到 base 后再激活。
+在当前页面创建一层 Back Guard。首次创建会增加一条同 URL 哨兵记录；刷新后的新运行时如果发现当前 sentinel，会直接接管而不重复增加记录。如果上一代正在执行 `dispose()` 清理，新 Guard 会排队，直到内部遍历回到 base 后再激活。
 
 非浏览器环境、History API 不完整、handler 不是函数或当前 `history.state` 不符合契约时同步抛错。
 
@@ -53,8 +53,7 @@ interface BackGuard {
 - 非最后一层可以立即移除。
 - 最后一层会清理 sentinel，并在观察到内部 base `popstate` 后 resolve。
 - 清理期间重复调用返回同一生命周期结果。
-- 同步 History 操作失败且 marker 成功回滚时，本次 Promise reject，Guard 仍可再次 `dispose()`。
-- 无法回滚或 sentinel 已丢失时整代 Guard fail-closed，后续调用继续 reject。
+- 同步 History 操作失败时，本次 Promise reject，整代 Guard fail-closed，后续调用继续 reject。
 
 主动导航必须等待清理：
 

@@ -124,6 +124,26 @@ describe("public API", () => {
     await guard.dispose();
   });
 
+  it("reports handler errors through the target window", async () => {
+    const reportError = vi.fn();
+    Object.defineProperty(target(), "reportError", {
+      configurable: true,
+      value: reportError,
+    });
+    vi.resetModules();
+    const { createBackGuard } = await import("../../src/index");
+    target().history.replaceState({ page: "origin" }, "", "/origin");
+    target().history.pushState({ page: "protected" }, "", "/protected");
+    const error = new Error("handler failed");
+    const guard = createBackGuard(() => {
+      throw error;
+    });
+
+    target().history.back();
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith(error));
+    await guard.dispose();
+  });
+
   it("recreates during disposal without growing another history entry", async () => {
     vi.resetModules();
     const { createBackGuard } = await import("../../src/index");

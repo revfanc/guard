@@ -1,70 +1,70 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryPort, Sentinel } from "../../src/history";
+import type {
+  HistoryPort,
+  HistorySentinel,
+} from "../../src/history";
 import { WindowCoordinator } from "../../src/runtime";
 import type { BackAttempt } from "../../src/types";
 
 const BASE_STATE = Symbol("base");
 const SENTINEL_STATE = Symbol("sentinel");
+const NO_FAILURE = Symbol("no failure");
 
-class FakeSentinel implements Sentinel {
+class FakeSentinel implements HistorySentinel {
   current = true;
   atBase = true;
-  rollbackSucceeds = true;
   restoreFailure: unknown;
-  releaseFailure: unknown;
-  readonly restore = vi.fn((state: unknown): void => {
+  releaseFailure: unknown = NO_FAILURE;
+  readonly restoreAtBase = vi.fn((): void => {
     if (this.restoreFailure) throw this.restoreFailure;
-    if (!this.isAtBase(state)) throw new Error("not at base");
+    if (!this.isAtBase()) throw new Error("not at base");
     this.current = true;
+    this.atBase = false;
   });
-  readonly release = vi.fn((): void => {
+  readonly releaseToBase = vi.fn((): void => {
     if (!this.current) throw new Error("sentinel was replaced");
+    if (this.releaseFailure !== NO_FAILURE) throw this.releaseFailure;
     this.current = false;
-    if (this.releaseFailure) {
-      if (this.rollbackSucceeds) this.current = true;
-      throw this.releaseFailure;
-    }
   });
-
-  matches(state: unknown): boolean {
-    return state === SENTINEL_STATE;
-  }
 
   isCurrent(): boolean {
     return this.current;
   }
 
-  isAtBase(state: unknown): boolean {
-    return this.atBase && state === BASE_STATE;
+  isAtBase(): boolean {
+    return this.atBase;
   }
 }
 
 class FakeHistory implements HistoryPort {
   readonly sentinels: FakeSentinel[] = [];
-  readonly report = vi.fn();
+  readonly reportError = vi.fn();
   readonly back = vi.fn(() => {
     if (this.backFailure) throw this.backFailure;
   });
   createFailure: unknown;
   backFailure: unknown;
-  private listener?: (state: unknown, intercept: () => void) => void;
+  private listener?: (intercept: () => void) => void;
 
-  createSentinel(): Sentinel {
+  createSentinel(): HistorySentinel {
     if (this.createFailure) throw this.createFailure;
     const sentinel = new FakeSentinel();
     this.sentinels.push(sentinel);
     return sentinel;
   }
 
-  listen(listener: (state: unknown, intercept: () => void) => void): void {
+  listenToPopState(listener: (intercept: () => void) => void): void {
     this.listener = listener;
   }
 
   emit(state: unknown): ReturnType<typeof vi.fn> {
     const intercept = vi.fn();
     const sentinel = this.sentinels[this.sentinels.length - 1];
-    if (sentinel) sentinel.current = state === SENTINEL_STATE;
-    this.listener?.(state, intercept);
+    if (sentinel) {
+      sentinel.current = state === SENTINEL_STATE;
+      sentinel.atBase = state === BASE_STATE;
+    }
+    this.listener?.(intercept);
     return intercept;
   }
 
@@ -98,7 +98,7 @@ function currentSentinel(): FakeSentinel {
 
 beforeEach(() => {
   history = new FakeHistory();
-  runtime = new WindowCoordinator(history);
+  runtime = new WindowCoordinator(history, history.reportError);
 });
 
 describe("WindowCoordinator", () => {
@@ -153,7 +153,7 @@ describe("WindowCoordinator", () => {
 
     history.emitBase();
     expect(attempt?.allow()).toBe(true);
-    expect(currentSentinel().release).toHaveBeenCalledOnce();
+    expect(currentSentinel().releaseToBase).toHaveBeenCalledOnce();
     expect(history.back).not.toHaveBeenCalled();
 
     const disposed = guard.dispose();
@@ -197,7 +197,7 @@ describe("WindowCoordinator", () => {
 
     history.emitBase();
     expect(innerAttempt?.allow()).toBe(true);
-    expect(currentSentinel().release).not.toHaveBeenCalled();
+    expect(currentSentinel().releaseToBase).not.toHaveBeenCalled();
     expect(history.back).not.toHaveBeenCalled();
     await inner.dispose();
 
@@ -212,7 +212,7 @@ describe("WindowCoordinator", () => {
     const inner = runtime.add(vi.fn());
 
     await outer.dispose();
-    expect(currentSentinel().release).not.toHaveBeenCalled();
+    expect(currentSentinel().releaseToBase).not.toHaveBeenCalled();
 
     let settled = false;
     const disposed = inner.dispose().then(() => {
@@ -265,23 +265,23 @@ describe("WindowCoordinator", () => {
     decision.resolve();
   });
 
-  it("rejects disposal when release rolls back and permits retry", async () => {
+  it("fails closed when disposal cannot release the sentinel", async () => {
     const error = new Error("back failed");
     const guard = runtime.add(vi.fn());
     const sentinel = currentSentinel();
     sentinel.releaseFailure = error;
 
     await expect(guard.dispose()).rejects.toBe(error);
-    expect(sentinel.current).toBe(true);
-    expect(history.report).not.toHaveBeenCalled();
+    await expect(guard.dispose()).rejects.toBe(error);
+    expect(history.reportError).not.toHaveBeenCalled();
 
-    sentinel.releaseFailure = undefined;
-    const disposed = guard.dispose();
+    const replacement = runtime.add(vi.fn());
+    const disposed = replacement.dispose();
     history.emitBase();
     await disposed;
   });
 
-  it("reports a failed allow and keeps the attempt valid after rollback", async () => {
+  it("reports a failed allow and closes its guard", async () => {
     const decision = deferred();
     const error = new Error("back failed");
     let attempt: BackAttempt | undefined;
@@ -293,31 +293,26 @@ describe("WindowCoordinator", () => {
     currentSentinel().releaseFailure = error;
 
     expect(attempt?.allow()).toBe(false);
-    expect(history.report).toHaveBeenCalledWith(error);
-
-    currentSentinel().releaseFailure = undefined;
-    expect(attempt?.allow()).toBe(true);
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
+    expect(history.reportError).toHaveBeenCalledWith(error);
+    expect(attempt?.allow()).toBe(false);
+    await expect(guard.dispose()).rejects.toBe(error);
     decision.resolve();
   });
 
-  it("fails closed if disposal cannot roll back the marker", async () => {
-    const error = new Error("back failed after replacement");
-    const guard = runtime.add(vi.fn());
-    const sentinel = currentSentinel();
-    sentinel.releaseFailure = error;
-    sentinel.rollbackSucceeds = false;
-
-    await expect(guard.dispose()).rejects.toBe(error);
-    await expect(guard.dispose()).rejects.toBe(error);
-    const replacement = runtime.add(vi.fn());
-    expect(history.sentinels).toHaveLength(2);
-
-    const disposed = replacement.dispose();
+  it("does not accept allow when release throws undefined", async () => {
+    const decision = deferred();
+    let attempt: BackAttempt | undefined;
+    const guard = runtime.add((current) => {
+      attempt = current;
+      return decision.promise;
+    });
     history.emitBase();
-    await disposed;
+    currentSentinel().releaseFailure = undefined;
+
+    expect(attempt?.allow()).toBe(false);
+    expect(history.reportError).toHaveBeenCalledWith(undefined);
+    await expect(guard.dispose()).rejects.toBeUndefined();
+    decision.resolve();
   });
 
   it("re-arms after an unhandled callback rejection and reports it", async () => {
@@ -329,7 +324,9 @@ describe("WindowCoordinator", () => {
     const guard = runtime.add(onBack);
 
     history.emitBase();
-    await vi.waitFor(() => expect(history.report).toHaveBeenCalledWith(error));
+    await vi.waitFor(() =>
+      expect(history.reportError).toHaveBeenCalledWith(error),
+    );
     history.emitBase();
     expect(onBack).toHaveBeenCalledTimes(2);
 
@@ -343,7 +340,7 @@ describe("WindowCoordinator", () => {
     currentSentinel().current = false;
 
     await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
-    expect(history.report).not.toHaveBeenCalled();
+    expect(history.reportError).not.toHaveBeenCalled();
     await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
     runtime.add(vi.fn());
     expect(history.sentinels).toHaveLength(2);
@@ -360,7 +357,7 @@ describe("WindowCoordinator", () => {
     currentSentinel().current = false;
 
     expect(attempt?.allow()).toBe(false);
-    expect(history.report).toHaveBeenCalledWith(
+    expect(history.reportError).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("sentinel was replaced") }),
     );
     await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
@@ -373,7 +370,7 @@ describe("WindowCoordinator", () => {
     currentSentinel().restoreFailure = error;
 
     expect(history.emitBase()).toHaveBeenCalledOnce();
-    expect(history.report).toHaveBeenCalledWith(error);
+    expect(history.reportError).toHaveBeenCalledWith(error);
     await expect(guard.dispose()).rejects.toBe(error);
   });
 
@@ -386,7 +383,7 @@ describe("WindowCoordinator", () => {
 
     history.emitBase();
     await oldDisposed;
-    expect(history.report).toHaveBeenCalledWith(error);
+    expect(history.reportError).toHaveBeenCalledWith(error);
     await expect(replacement.dispose()).rejects.toBe(error);
   });
 
@@ -395,7 +392,7 @@ describe("WindowCoordinator", () => {
     const intercept = history.emit({ external: true });
 
     expect(intercept).not.toHaveBeenCalled();
-    expect(history.report).toHaveBeenCalledWith(
+    expect(history.reportError).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("guarded base") }),
     );
     await expect(guard.dispose()).rejects.toThrow("guarded base");
@@ -416,7 +413,7 @@ describe("WindowCoordinator", () => {
     const disposed = guard.dispose();
     history.emitBase();
     await disposed;
-    expect(history.report).toHaveBeenCalledWith(error);
+    expect(history.reportError).toHaveBeenCalledWith(error);
     decision.resolve();
   });
 });
