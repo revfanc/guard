@@ -14,7 +14,7 @@ hero:
       link: /api
 features:
   - title: 明确的返回决策
-    details: 调用 attempt.allow() 就同意当前 Back；不调用就继续保护。
+    details: 调用 allow() 就同意当前 Back；不调用就继续保护。
   - title: 可等待的生命周期
     details: await guard.dispose() 后再主动导航，不再向清理方法传业务 action。
   - title: 原生 History API
@@ -26,9 +26,9 @@ features:
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
-const guard = createBackGuard(async (attempt) => {
+const guard = createBackGuard(async (allow) => {
   if (await confirmLeaving()) {
-    attempt.allow()
+    allow()
   }
 })
 ```

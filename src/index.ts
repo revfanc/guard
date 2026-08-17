@@ -2,7 +2,6 @@ import { createGuard } from "./runtime";
 import type { BackGuard, BackHandler } from "./types";
 
 export type {
-  BackAttempt,
   BackGuard,
   BackHandler,
 } from "./types";

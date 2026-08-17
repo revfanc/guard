@@ -14,9 +14,9 @@ pnpm add @revfanc/guard
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
-const guard = createBackGuard(async (attempt) => {
+const guard = createBackGuard(async (allow) => {
   if (await confirmLeaving()) {
-    attempt.allow()
+    allow()
   }
 })
 
@@ -27,7 +27,7 @@ await router.push("/next")
 
 The library adds one same-URL sentinel entry. A single-step Back returns to the
 protected entry, restores the sentinel, and calls the handler. Calling
-`attempt.allow()` accepts that Back; when it is the final guard, the library
+`allow()` accepts that Back; when it is the final guard, the library
 cleans its sentinel and continues the original Back automatically. If the
 handler settles without calling `allow()`, the page stays protected and the
 next Back creates a new attempt.

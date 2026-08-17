@@ -10,9 +10,9 @@ import { createBackGuard, type BackGuard } from "@revfanc/guard"
 const guard = shallowRef<BackGuard>()
 
 onMounted(() => {
-  guard.value = createBackGuard(async (attempt) => {
+  guard.value = createBackGuard(async (allow) => {
     if (await confirmLeaving()) {
-      attempt.allow()
+      allow()
     }
   })
 })

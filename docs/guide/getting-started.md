@@ -13,25 +13,25 @@ pnpm add @revfanc/guard
 ```ts
 import { createBackGuard } from "@revfanc/guard"
 
-const guard = createBackGuard(async (attempt) => {
+const guard = createBackGuard(async (allow) => {
   if (await confirmLeaving()) {
-    attempt.allow()
+    allow()
   }
 })
 ```
 
 首次创建时会增加一条同 URL sentinel；刷新后重新创建 Guard 会直接接管当前 sentinel。用户单步返回后，库恢复保护并调用 handler：
 
-- 调用 `attempt.allow()`：同意这次返回；最后一层会自动继续原始 Back。
+- 调用 `allow()`：同意这次返回；最后一层会自动继续原始 Back。
 - handler 完成但没有调用 `allow()`：留在页面并重新等待下一次返回。
-- handler Promise pending：重复 Back 不会产生第二个 attempt。
+- handler Promise pending：逐次重复 Back 不会产生第二次决策。
 
 异步弹窗必须返回 Promise：
 
 ```ts
-const guard = createBackGuard((attempt) => {
+const guard = createBackGuard((allow) => {
   return openDialog().then((confirmed) => {
-    if (confirmed) attempt.allow()
+    if (confirmed) allow()
   })
 })
 ```

@@ -1,28 +1,25 @@
-const SENTINEL_KEY = "__revfanc_guard__";
-const INVALID_STATE =
-  "@revfanc/guard: history.state must be null or a plain object.";
-const SENTINEL_REPLACED =
-  "@revfanc/guard: the history sentinel was replaced.";
-const SENTINEL_NOT_EDITABLE =
-  "@revfanc/guard: the history sentinel is not editable.";
+const KEY = "__revfanc_guard__";
+const INVALID = "@revfanc/guard: history.state must be null or a plain object.";
+const REPLACED = "@revfanc/guard: the history sentinel was replaced.";
+const LOCKED = "@revfanc/guard: the history sentinel is not editable.";
 
-type HistoryState = null | Record<string, unknown>;
-type SentinelState = Record<string, unknown>;
+type State = null | Record<string, unknown>;
+type Marked = Record<string, unknown>;
 
-export interface HistorySentinel {
-  isCurrent(): boolean;
-  isAtBase(): boolean;
-  restoreAtBase(): void;
-  releaseToBase(): void;
+export interface Sentinel {
+  current(): boolean;
+  base(): boolean;
+  restore(): void;
+  release(): void;
 }
 
-export interface HistoryPort {
-  createSentinel(): HistorySentinel;
-  listenToPopState(listener: (intercept: () => void) => void): void;
+export interface Adapter {
+  create(): Sentinel;
+  listen(listener: (intercept: () => void) => void): void;
   back(): void;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+function plain(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
@@ -30,105 +27,90 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function isHistoryState(value: unknown): value is HistoryState {
-  return value === null || isPlainRecord(value);
+function valid(value: unknown): value is State {
+  return value === null || plain(value);
 }
 
-function assertHistoryState(value: unknown): asserts value is HistoryState {
-  if (!isHistoryState(value)) throw new TypeError(INVALID_STATE);
+function assert(value: unknown): asserts value is State {
+  if (!valid(value)) throw new TypeError(INVALID);
 }
 
-function hasSentinelMarker(state: HistoryState): state is SentinelState {
-  return (
-    state !== null &&
-    Object.prototype.hasOwnProperty.call(state, SENTINEL_KEY)
-  );
+function marked(value: State): value is Marked {
+  return value !== null && Object.prototype.hasOwnProperty.call(value, KEY);
 }
 
-function isBaseState(value: unknown): value is HistoryState {
-  return isHistoryState(value) && !hasSentinelMarker(value);
-}
-
-function createHistorySentinel(target: Window): HistorySentinel {
+function sentinel(target: Window): Sentinel {
   const { history, location } = target;
   const url = location.href;
-  const isSameUrl = (): boolean => location.href === url;
-
-  const pushSentinel = (state: HistoryState): void => {
-    let editable = state;
-    if (editable !== null && !Object.isExtensible(editable)) {
-      history.replaceState(editable, "", url);
+  const read = (): State | undefined => {
+    if (location.href !== url) return undefined;
+    const state: unknown = history.state;
+    return valid(state) ? state : undefined;
+  };
+  const clean = (): State | undefined => {
+    const state = read();
+    return state !== undefined && !marked(state) ? state : undefined;
+  };
+  const marker = (): Marked | undefined => {
+    const state = read();
+    return state !== undefined && marked(state) ? state : undefined;
+  };
+  const push = (state: State): void => {
+    let value = state;
+    if (value !== null && !Object.isExtensible(value)) {
+      history.replaceState(value, "", url);
       const current: unknown = history.state;
-      assertHistoryState(current);
-      editable = current;
+      assert(current);
+      value = current;
     }
 
-    const sentinelState = editable ?? {};
-    Object.defineProperty(sentinelState, SENTINEL_KEY, {
+    const entry = value ?? {};
+    Object.defineProperty(entry, KEY, {
       configurable: true,
       enumerable: true,
       value: state === null,
       writable: true,
     });
     try {
-      history.pushState(sentinelState, "", url);
+      history.pushState(entry, "", url);
     } finally {
-      if (editable !== null) delete sentinelState[SENTINEL_KEY];
+      if (value !== null) delete entry[KEY];
     }
   };
 
-  const readBaseState = (): HistoryState | undefined => {
-    if (!isSameUrl()) return undefined;
-    const state: unknown = history.state;
-    return isBaseState(state) ? state : undefined;
-  };
-
-  const readSentinelState = (): SentinelState | undefined => {
-    if (!isSameUrl()) return undefined;
-    const state: unknown = history.state;
-    return isHistoryState(state) && hasSentinelMarker(state)
-      ? state
-      : undefined;
-  };
-
-  const initialState: unknown = history.state;
-  assertHistoryState(initialState);
-  if (!hasSentinelMarker(initialState)) pushSentinel(initialState);
+  const initial: unknown = history.state;
+  assert(initial);
+  if (!marked(initial)) push(initial);
 
   return {
-    isCurrent: () => readSentinelState() !== undefined,
-    isAtBase: () => readBaseState() !== undefined,
-    restoreAtBase(): void {
-      const state = readBaseState();
-      if (state === undefined) throw new Error(SENTINEL_REPLACED);
-      pushSentinel(state);
+    current: () => marker() !== undefined,
+    base: () => clean() !== undefined,
+    restore(): void {
+      const state = clean();
+      if (state === undefined) throw new Error(REPLACED);
+      push(state);
     },
-    releaseToBase(): void {
-      let state = readSentinelState();
-      if (state === undefined) throw new Error(SENTINEL_REPLACED);
-      const startedFromNull = state[SENTINEL_KEY] === true;
+    release(): void {
+      let state = marker();
+      if (state === undefined) throw new Error(REPLACED);
+      const nullable = state[KEY] === true;
 
-      const marker = Object.getOwnPropertyDescriptor(state, SENTINEL_KEY);
-      if (!Object.isExtensible(state) || !marker?.configurable) {
+      let descriptor = Object.getOwnPropertyDescriptor(state, KEY);
+      if (!Object.isExtensible(state) || !descriptor?.configurable) {
         history.replaceState(state, "", url);
-        state = readSentinelState();
-        if (state === undefined) throw new Error(SENTINEL_REPLACED);
+        state = marker();
+        if (state === undefined) throw new Error(REPLACED);
+        descriptor = Object.getOwnPropertyDescriptor(state, KEY);
+      }
+      if (!descriptor?.configurable || !delete state[KEY]) {
+        throw new Error(LOCKED);
       }
 
-      const editableMarker = Object.getOwnPropertyDescriptor(
-        state,
-        SENTINEL_KEY,
-      );
-      if (!editableMarker?.configurable || !delete state[SENTINEL_KEY]) {
-        throw new Error(SENTINEL_NOT_EDITABLE);
-      }
-
-      const base =
-        startedFromNull && Reflect.ownKeys(state).length === 0 ? null : state;
+      const base = nullable && Reflect.ownKeys(state).length === 0 ? null : state;
       try {
         history.replaceState(base, "", url);
       } catch (error) {
-        Object.defineProperty(state, SENTINEL_KEY, editableMarker);
+        Object.defineProperty(state, KEY, descriptor);
         throw error;
       }
       history.back();
@@ -136,15 +118,13 @@ function createHistorySentinel(target: Window): HistorySentinel {
   };
 }
 
-export function createHistoryPort(target: Window): HistoryPort {
+export function createHistory(target: Window): Adapter {
   return {
-    createSentinel: () => createHistorySentinel(target),
-    listenToPopState(listener): void {
+    create: () => sentinel(target),
+    listen(listener): void {
       target.addEventListener(
         "popstate",
-        event => {
-          listener(() => event.stopImmediatePropagation());
-        },
+        event => listener(() => event.stopImmediatePropagation()),
         true,
       );
     },

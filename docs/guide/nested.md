@@ -3,30 +3,30 @@
 多个 Guard 按后创建优先（LIFO）工作。一次 Back 只交给当前栈顶，不会替其他层作决定。
 
 ```ts
-let pageAttempt: BackAttempt | undefined
+let pageAllow: (() => boolean) | undefined
 
-const pageGuard = createBackGuard((attempt) => {
-  pageAttempt = attempt
+const pageGuard = createBackGuard((allow) => {
+  pageAllow = allow
   return showPageExitDialog().then((confirmed) => {
-    if (confirmed) attempt.allow()
+    if (confirmed) allow()
   })
 })
 
-const modalGuard = createBackGuard((attempt) => {
+const modalGuard = createBackGuard((allow) => {
   return showModalDialog().then((close) => {
     if (close) {
       closeModal()
-      attempt.allow()
+      allow()
     }
   })
 })
 ```
 
-## Attempt 暂停
+## 决策暂停
 
-如果 `pageGuard` 已有 pending attempt，随后创建 `modalGuard`，页面 attempt 会暂停。暂停期间 `pageAttempt.allow()` 返回 `false`。
+如果 `pageGuard` 已有 pending 决策，随后创建 `modalGuard`，页面决策会暂停。暂停期间 `pageAllow()` 返回 `false`。
 
-上层 Guard 被 dispose 后，只要页面 handler 的 Promise 仍 pending，原 attempt 就能恢复；如果 Promise 已完成，原 attempt 已失效，下一次 Back 会重新调用页面 handler。
+上层 Guard 被 dispose 后，只要页面 handler 的 Promise 仍 pending，原 `allow` 就能恢复；如果 Promise 已完成，原 `allow` 已失效，下一次 Back 会重新调用页面 handler。
 
 ## `allow()` 只完成栈顶层
 

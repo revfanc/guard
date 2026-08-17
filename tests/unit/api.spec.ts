@@ -1,8 +1,6 @@
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackAttempt } from "../../src/types";
 
-const RUNTIME_SYMBOL = Symbol.for("@revfanc/guard.runtime.v3");
 const STATE_KEY = "__revfanc_guard__";
 
 let dom: JSDOM;
@@ -33,7 +31,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete (dom.window as unknown as Record<PropertyKey, unknown>)[RUNTIME_SYMBOL];
   dom.window.close();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -87,19 +84,19 @@ describe("public API", () => {
     const { createBackGuard } = await import("../../src/index");
     target().history.replaceState({ page: "origin" }, "", "/origin");
     target().history.pushState({ page: "protected" }, "", "/protected");
-    let attempt: BackAttempt | undefined;
+    let allowBack: (() => boolean) | undefined;
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => {
       finish = resolve;
     });
     const guard = createBackGuard((current) => {
-      attempt = current;
+      allowBack = current;
       return pending;
     });
 
     target().history.back();
-    await vi.waitFor(() => expect(attempt).toBeDefined());
-    expect(attempt?.allow()).toBe(true);
+    await vi.waitFor(() => expect(allowBack).toBeDefined());
+    expect(allowBack?.()).toBe(true);
     await vi.waitFor(() => {
       expect(target().location.pathname).toBe("/origin");
     });

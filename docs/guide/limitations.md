@@ -21,6 +21,8 @@
 
 排队多次 Back 是硬边界：浏览器先移动历史游标，库无法取消已经排队的后续 traversal。在 `dispose()` cleanup 中同步创建的新 Guard 也要等 base `popstate` 后才激活；此前立即再次 Back 可能越过单 sentinel。
 
+如果 Back 已经越过已知 base，库不会在错误 URL 上强行恢复 sentinel。受影响的 Guard 会停止，当前 URL 与业务 state 保持不变，故障进入浏览器全局错误通道。
+
 如果预期 `popstate` 未出现，`dispose()` Promise 不会完成，排队 Guard 也不会激活。库不会用 timeout 或 `history.length` 猜测遍历成功。
 
 ## `history.state` 契约

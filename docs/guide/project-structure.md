@@ -13,9 +13,9 @@
 guard/
 ├─ src/
 │  ├─ index.ts             # 唯一公开入口
-│  ├─ types.ts             # BackHandler / Attempt / Guard
-│  ├─ history.ts           # sentinel 与 History API 副作用
-│  └─ runtime.ts           # allow、dispose、LIFO 与状态转换
+│  ├─ types.ts             # BackHandler / BackGuard
+│  ├─ history.ts           # Adapter、Sentinel 与 History API 副作用
+│  └─ runtime.ts           # active、cleaning、LIFO 与生命周期
 ├─ tests/
 │  ├─ unit/                # 确定性的边界与异常测试
 │  └─ e2e/                 # 三浏览器原生 History fixture
@@ -24,7 +24,13 @@ guard/
 └─ tsdown.config.ts        # ESM + CJS + declarations
 ```
 
-只有 `src/index.ts` 是公开模块。内部保持 `idle`、`armed`、`traversing` 三阶段；公开 API 不暴露阶段、History marker 或业务导航 action。
+只有 `src/index.ts` 是公开模块。内部保持 `idle`、`active`、`cleaning` 三阶段；公开 API 不暴露阶段、History marker 或业务导航 action。
+
+## 核心边界
+
+- `index.ts` 只校验公开输入和浏览器能力。
+- `history.ts` 封装 `pushState`、`replaceState`、`popstate` 与 Back，不处理 Guard 栈。
+- `runtime.ts` 只通过 `Adapter` 操作历史，负责 `guards`、`allow()`、`dispose()` 和错误生命周期。
 
 ## 发布约束
 

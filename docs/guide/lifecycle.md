@@ -3,31 +3,31 @@
 公开模型只有两个动作：
 
 ```ts
-attempt.allow()
+allow()
 await guard.dispose()
 ```
 
-它们属于不同领域：`allow()` 是一次 Back 决策，`dispose()` 是 Guard 资源清理，因此不使用同一个模糊动词。
+`allow()` 是一次 Back 决策，`dispose()` 是 Guard 资源清理。
 
-## Attempt
+## 决策
 
-用户 Back 后，库恢复 sentinel，并把 attempt 交给栈顶 Guard：
+用户 Back 后，库先恢复 sentinel，再把 `allow` 交给最上层 Guard：
 
 ```ts
-const guard = createBackGuard(async (attempt) => {
+const guard = createBackGuard(async (allow) => {
   if (await confirmLeaving()) {
-    attempt.allow()
+    allow()
   }
 })
 ```
 
-handler 完成但未调用 `allow()` 时，这次 Back 被拒绝，attempt 自动失效。下一次 Back 会产生新 attempt。handler Promise pending 时，重复 Back 只恢复 sentinel，不会重复展示业务决策。
+handler 完成但未调用 `allow()` 时，这次 Back 被拒绝，`allow` 自动失效。下一次 Back 会产生新决策。handler Promise pending 时，逐次重复 Back 只恢复 sentinel，不会重复展示业务决策。
 
-如果 attempt 上方创建了新 Guard，它会暂停；暂停时 `allow()` 返回 `false`。上层 Guard 被移除后，只要原 handler 仍 pending，原 attempt 就能恢复。若 handler 已经完成，attempt 已失效，下一次 Back 会重新调用 handler。
+如果当前 Guard 上方创建了新 Guard，它的 `allow` 会暂停；暂停时调用返回 `false`。上层 Guard 被移除后，只要原 handler 仍 pending，原 `allow` 就能恢复。若 handler 已经完成，`allow` 已失效，下一次 Back 会重新调用 handler。
 
 ## Guard
 
-`dispose()` 可以移除任意栈层：
+`dispose()` 可以移除任意层：
 
 ```ts
 await guard.dispose()
@@ -42,24 +42,23 @@ await guard.dispose()
 await router.push("/next")
 ```
 
-## 三个内部阶段
+## 三个阶段
 
 ```text
-idle
-  └─ createBackGuard() → armed
-
-armed
-  ├─ final dispose() → traversing/restart → armed / idle
-  └─ final allow()   → traversing/back    → idle → native Back
+idle -> active -> cleaning -> idle
+                         -> active
 ```
 
-- `idle`：没有活动 sentinel 或 Guard。
-- `armed`：sentinel 位于当前记录，LIFO Guard 栈正常工作。
-- `traversing/restart`：最后一层正在清理；新 Guard 可以排队，但要等 base `popstate` 后才激活。
-- `traversing/back`：最终 Back 已经获准，决定不可撤回；清理完成后自动再执行一次原生 Back，新 Guard 创建会同步抛错。
+- `idle`：没有 sentinel 或 Guard。
+- `active`：sentinel 生效，`guards` 按 LIFO 工作。
+- `cleaning`：`closing` 正在清除 sentinel 并等待 base `popstate`。
+- `stay`：最后一个 Guard 正在 dispose；清理期间创建的新 Guard 进入 `guards`，随后重新 `active`。
+- `leave`：最后一个 Guard 已调用 `allow()`；清理完成后继续原生 Back，此时不能再创建 Guard。
 
-History API 没有遍历完成 Promise。runtime 只能通过目标 `popstate` 完成 `dispose()` 或继续 Back，不使用 timeout 或 `history.length` 猜测结果。如果浏览器不发送预期事件，Promise 会保持 pending。
+`active` 和 `cleaning` 统一使用 `guards`。前者表示当前活动的 Guard，后者表示清理完成后需要激活的 Guard；被清理的最后一层单独保存在 `closing`。
+
+History API 没有遍历完成 Promise。Runtime 只能通过目标 `popstate` 完成 `dispose()` 或继续 Back，不使用 timeout 或 `history.length` 猜测结果。如果浏览器不发送预期事件，Promise 会保持 pending。
 
 ## 错误
 
-handler 未处理异常时，库先结束当前 attempt、保持页面受保护，再交给浏览器全局错误通道。`dispose()` 直接触发的错误通过 Promise rejection 返回。内部事件故障会使受影响的一代 Guard fail-closed，并走全局错误通道。
+handler 未处理异常时，库先结束当前决策、保持页面受保护，再交给浏览器全局错误通道。`dispose()` 直接触发的错误通过 Promise rejection 返回。外部替换 sentinel 或 Back 越过已知 base 时，相关 Guard 会停止，库不会在错误 URL 上补写历史。

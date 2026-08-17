@@ -1,4 +1,4 @@
-import { createBackGuard, type BackAttempt, type BackGuard } from "@guard";
+import { createBackGuard, type BackGuard } from "@guard";
 
 const STATE_KEY = "__revfanc_guard__";
 
@@ -45,8 +45,8 @@ export function mountVanillaFixture(): void {
 
   let guardA: BackGuard | undefined;
   let guardB: BackGuard | undefined;
-  let attemptA: BackAttempt | undefined;
-  let attemptB: BackAttempt | undefined;
+  let allowA: (() => boolean) | undefined;
+  let allowB: (() => boolean) | undefined;
   let finishA: (() => void) | undefined;
   let finishB: (() => void) | undefined;
 
@@ -71,8 +71,8 @@ export function mountVanillaFixture(): void {
   };
 
   const createA = (): BackGuard =>
-    createBackGuard((attempt) => {
-      attemptA = attempt;
+    createBackGuard((allow) => {
+      allowA = allow;
       const count = Number(query("a-attempts").textContent ?? "0") + 1;
       query("a-attempts").textContent = String(count);
       return new Promise<void>((resolve) => {
@@ -92,13 +92,13 @@ export function mountVanillaFixture(): void {
   const finishAttemptA = (): void => {
     finishA?.();
     finishA = undefined;
-    attemptA = undefined;
+    allowA = undefined;
   };
 
   const finishAttemptB = (): void => {
     finishB?.();
     finishB = undefined;
-    attemptB = undefined;
+    allowB = undefined;
   };
 
   query("enter").addEventListener("click", () => {
@@ -119,7 +119,7 @@ export function mountVanillaFixture(): void {
   });
 
   query("allow-attempt").addEventListener("click", () => {
-    const accepted = attemptA?.allow() ?? false;
+    const accepted = allowA?.() ?? false;
     finishAttemptA();
     query("decision").textContent = `attempt:${String(accepted)}`;
   });
@@ -181,8 +181,8 @@ export function mountVanillaFixture(): void {
   });
 
   query("add-b").addEventListener("click", () => {
-    guardB = createBackGuard((attempt) => {
-      attemptB = attempt;
+    guardB = createBackGuard((allow) => {
+      allowB = allow;
       const count = Number(query("b-attempts").textContent ?? "0") + 1;
       query("b-attempts").textContent = String(count);
       return new Promise<void>((resolve) => {
@@ -194,11 +194,11 @@ export function mountVanillaFixture(): void {
 
   query("try-a-allow").addEventListener("click", () => {
     query("decision").textContent =
-      `a-paused:${String(attemptA?.allow() ?? false)}`;
+      `a-paused:${String(allowA?.() ?? false)}`;
   });
 
   query("allow-b").addEventListener("click", () => {
-    const accepted = attemptB?.allow() ?? false;
+    const accepted = allowB?.() ?? false;
     finishAttemptB();
     guardB = undefined;
     query("decision").textContent = `b-allowed:${String(accepted)}`;
@@ -217,7 +217,7 @@ export function mountVanillaFixture(): void {
   });
 
   query("resume-a-allow").addEventListener("click", () => {
-    const accepted = attemptA?.allow() ?? false;
+    const accepted = allowA?.() ?? false;
     finishAttemptA();
     query("decision").textContent = `a-resumed:${String(accepted)}`;
   });

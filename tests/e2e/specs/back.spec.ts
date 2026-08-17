@@ -86,4 +86,60 @@ test.describe("Back decisions", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
     await expect(page).toHaveURL(/screen=protected/);
   });
+
+  test("same-task double Back either remains guarded or stops without rewriting state", async ({
+    page,
+    browserName,
+  }) => {
+    test.setTimeout(30_000);
+
+    await page.evaluate(() => {
+      history.back();
+      history.back();
+    });
+    await expect
+      .poll(
+        async () => Number(await page.getByTestId("popstates").textContent()),
+        { timeout: 15_000 },
+      )
+      .toBeGreaterThan(0);
+    await page.waitForTimeout(browserName === "webkit" ? 1_000 : 250);
+
+    const result = await page.evaluate(() => ({
+      decision: document.querySelector('[data-testid="decision"]')?.textContent,
+      marker: history.state?.__revfanc_guard__,
+      page: document.querySelector('[data-testid="page"]')?.textContent,
+      popstates: Number(
+        document.querySelector('[data-testid="popstates"]')?.textContent,
+      ),
+      screen: new URLSearchParams(location.search).get("screen"),
+      state: history.state,
+    }));
+
+    expect([1, 2]).toContain(result.popstates);
+    if (result.screen === "protected") {
+      expect(result.page).toBe("Protected");
+      expect(result.marker).toEqual(expect.any(Boolean));
+      expect(result.state).toMatchObject({ screen: "protected" });
+    } else {
+      expect(result.screen).toBe("origin");
+      expect(result.page).toBe("Origin");
+      expect(result.decision).toContain("missed the guarded base");
+      expect(result.marker).toBeUndefined();
+      expect(result.state).toEqual({ screen: "origin" });
+    }
+  });
+
+  test("history.go(-2) stops the guard without rewriting the destination", async ({ page }) => {
+    await page.evaluate(() => history.go(-2));
+
+    await expect(page).toHaveURL(/screen=origin/, { timeout: 15_000 });
+    await expect(page.getByTestId("decision")).toContainText(
+      "missed the guarded base",
+    );
+    await expect(page.getByTestId("a-attempts")).toHaveText("0");
+    await expect
+      .poll(() => page.evaluate(() => history.state))
+      .toEqual({ screen: "origin" });
+  });
 });

@@ -10,9 +10,9 @@ export function Editor() {
   const guardRef = useRef<ReturnType<typeof createBackGuard>>()
 
   useEffect(() => {
-    const guard = createBackGuard(async (attempt) => {
+    const guard = createBackGuard(async (allow) => {
       if (await confirmLeaving()) {
-        attempt.allow()
+        allow()
       }
     })
     guardRef.current = guard
