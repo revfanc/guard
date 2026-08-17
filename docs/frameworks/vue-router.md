@@ -34,7 +34,7 @@ async function goNext() {
   const current = guard.value
   guard.value = undefined
 
-  if (current) await current.dispose()
+  await current?.dispose()
   await router.push("/next")
 }
 ```

@@ -16,7 +16,7 @@ features:
   - title: 明确的返回决策
     details: 调用 allow() 就同意当前 Back；不调用就继续保护。
   - title: 可等待的生命周期
-    details: await guard.dispose() 后再主动导航，不再向清理方法传业务 action。
+    details: dispose() 等待 sentinel 清理；所有权已经丢失时正常结束，真实清理故障则 reject。
   - title: 原生 History API
     details: 聚焦同文档单步 Back，不假装提供 router POP 或浏览器级导航锁。
 ---

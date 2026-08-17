@@ -5,17 +5,17 @@ import {
 } from "./history";
 import type { BackGuard, BackHandler } from "./types";
 
-const REPLACED = "@revfanc/guard: the history sentinel was replaced.";
+const RUNTIME = Symbol.for("@revfanc/guard.runtime");
 const LEAVING = "@revfanc/guard: a Back navigation is already being allowed.";
-const CLOSED = Symbol("closed");
+const CONFLICT = "@revfanc/guard: the runtime slot is already occupied.";
 
-type Result = typeof CLOSED | { error: unknown };
 type Guard = {
   handler: BackHandler;
   allow?: () => boolean;
-  result?: Result;
-  closed: Promise<Result>;
-  close(result: Result): void;
+  settled: boolean;
+  done: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
 };
 type Base = {
   sentinel: Sentinel;
@@ -31,8 +31,10 @@ type Cleaning = Base & {
 };
 type State = Active | Cleaning | undefined;
 type Reporter = (error: unknown) => void;
-
-const runtimes = new WeakMap<Window, Runtime>();
+type SharedRuntime = {
+  add(handler: BackHandler): BackGuard;
+};
+type RuntimeWindow = Window & { [key: symbol]: unknown };
 
 function reporter(target: Window): Reporter {
   return (error) => {
@@ -40,28 +42,34 @@ function reporter(target: Window): Reporter {
     if (typeof reportError === "function") {
       reportError.call(target, error);
     } else {
-      void Promise.resolve().then(() => {
+      target.setTimeout(() => {
         throw error;
-      });
+      }, 0);
     }
   };
 }
 
 function guard(handler: BackHandler): Guard {
-  let close!: (result: Result) => void;
-  const closed = new Promise<Result>((resolve) => {
-    close = resolve;
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const done = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { handler, closed, close };
+  // A guard can fail from a popstate before its owner calls dispose().
+  void done.catch(() => undefined);
+  return { handler, settled: false, done, resolve, reject };
 }
 
-function wait(item: Guard): Promise<void> {
-  return item.closed.then((result) => {
-    if (result !== CLOSED) throw result.error;
-  });
+function shared(value: unknown): value is SharedRuntime {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { add?: unknown }).add === "function"
+  );
 }
 
-export class Runtime {
+export class Runtime implements SharedRuntime {
   private state: State;
 
   constructor(
@@ -78,18 +86,27 @@ export class Runtime {
     if (!state) {
       this.activate([item]);
     } else if (state.status === "active") {
-      if (!state.sentinel.current()) {
-        const error = new Error(REPLACED);
-        this.fail(state.guards, error, false);
+      let current: boolean;
+      try {
+        current = state.sentinel.current();
+      } catch (error) {
+        this.fail(state.guards, error);
         throw error;
       }
-      state.guards.push(item);
+      if (!current) {
+        this.finish(state.guards);
+        this.activate([item]);
+      } else {
+        state.guards.push(item);
+      }
     } else if (state.action === "leave") {
       throw new Error(LEAVING);
     } else {
       state.guards.push(item);
     }
-    return { dispose: () => this.dispose(item) };
+    return {
+      dispose: () => this.dispose(item),
+    };
   }
 
   private activate(guards: Guard[]): void {
@@ -111,15 +128,15 @@ export class Runtime {
     const guards = active
       ? state.guards
       : [state.closing, ...state.guards];
-    if (!state.sentinel.base()) {
-      this.fail(
-        guards,
-        new Error(
-          active
-            ? "@revfanc/guard: back navigation missed the guarded base."
-            : "@revfanc/guard: sentinel cleanup missed its base.",
-        ),
-      );
+    let base: boolean;
+    try {
+      base = state.sentinel.base();
+    } catch (error) {
+      this.fail(guards, error, true);
+      return;
+    }
+    if (!base) {
+      this.finish(guards);
       return;
     }
 
@@ -128,7 +145,7 @@ export class Runtime {
       try {
         state.sentinel.restore();
       } catch (error) {
-        this.fail(state.guards, error);
+        this.fail(state.guards, error, true);
         return;
       }
       const item = this.top(state.guards);
@@ -136,22 +153,32 @@ export class Runtime {
       return;
     }
 
-    this.close(state.closing, CLOSED);
+    try {
+      state.sentinel.settle();
+    } catch (error) {
+      this.fail(guards, error, true);
+      return;
+    }
+
+    this.state = undefined;
     if (state.action === "leave") {
-      this.state = undefined;
       try {
         this.history.back();
       } catch (error) {
+        this.reject(state.closing, error);
         this.report(error);
+        return;
       }
-    } else if (state.guards.length === 0) {
-      this.state = undefined;
-    } else {
-      try {
-        this.activate(state.guards);
-      } catch (error) {
-        this.fail(state.guards, error);
-      }
+      this.resolve(state.closing);
+      return;
+    }
+
+    this.resolve(state.closing);
+    if (state.guards.length === 0) return;
+    try {
+      this.activate(state.guards);
+    } catch (error) {
+      this.fail(state.guards, error, true);
     }
   }
 
@@ -193,44 +220,52 @@ export class Runtime {
       return this.clean(state, item, "leave", true);
     }
     state.guards.pop();
-    this.close(item, CLOSED);
+    this.resolve(item);
     return true;
   }
 
   private dispose(item: Guard): Promise<void> {
-    if (item.result) return wait(item);
+    if (item.settled) return item.done;
     const state = this.state;
 
     if (state?.status === "cleaning") {
-      if (state.closing === item) return wait(item);
+      if (state.closing === item) return item.done;
       const index = state.guards.indexOf(item);
       if (index >= 0) {
         state.guards.splice(index, 1);
-        this.close(item, CLOSED);
-        return wait(item);
+        this.resolve(item);
+        return item.done;
       }
     } else if (state?.status === "active") {
       const index = state.guards.indexOf(item);
       if (index >= 0) {
-        if (!state.sentinel.current()) {
-          const error = new Error(REPLACED);
-          this.fail(state.guards, error, false);
-          return wait(item);
+        let current: boolean;
+        try {
+          current = state.sentinel.current();
+        } catch (error) {
+          this.fail(state.guards, error);
+          return item.done;
+        }
+        if (!current) {
+          this.finish(state.guards);
+          return item.done;
         }
         if (state.guards.length > 1) {
           state.guards.splice(index, 1);
-          this.close(item, CLOSED);
-          return wait(item);
+          this.resolve(item);
+          return item.done;
         }
 
         this.clean(state, item, "stay", false);
-        return wait(item);
+        return item.done;
       }
     }
 
-    const error = new Error("@revfanc/guard: the guard is no longer active.");
-    this.close(item, { error });
-    return wait(item);
+    this.reject(
+      item,
+      new Error("@revfanc/guard: the guard is no longer active."),
+    );
+    return item.done;
   }
 
   private clean(
@@ -250,7 +285,7 @@ export class Runtime {
     try {
       state.sentinel.release();
     } catch (error) {
-      this.fail([cleaning.closing, ...cleaning.guards], error, false);
+      this.fail([cleaning.closing, ...cleaning.guards], error);
       if (report) this.report(error);
       return false;
     }
@@ -260,30 +295,58 @@ export class Runtime {
   }
 
   private owns(state: Active): boolean {
-    if (state.sentinel.current()) return true;
-    this.fail(state.guards, new Error(REPLACED));
+    let current: boolean;
+    try {
+      current = state.sentinel.current();
+    } catch (error) {
+      this.fail(state.guards, error, true);
+      return false;
+    }
+    if (current) return true;
+    this.finish(state.guards);
     return false;
   }
 
-  private close(item: Guard, result: Result): void {
-    if (item.result) return;
+  private resolve(item: Guard): void {
+    if (item.settled) return;
     item.allow = undefined;
-    item.result = result;
-    item.close(result);
+    item.settled = true;
+    item.resolve();
   }
 
-  private fail(guards: Guard[], error: unknown, report = true): void {
-    for (const item of guards) this.close(item, { error });
+  private reject(item: Guard, error: unknown): void {
+    if (item.settled) return;
+    item.allow = undefined;
+    item.settled = true;
+    item.reject(error);
+  }
+
+  private finish(guards: Guard[]): void {
+    for (const item of guards) this.resolve(item);
+    this.state = undefined;
+  }
+
+  private fail(guards: Guard[], error: unknown, report = false): void {
+    for (const item of guards) this.reject(item, error);
     this.state = undefined;
     if (report) this.report(error);
   }
 }
 
 export function createGuard(target: Window, handler: BackHandler): BackGuard {
-  let runtime = runtimes.get(target);
-  if (!runtime) {
-    runtime = new Runtime(createHistory(target), reporter(target));
-    runtimes.set(target, runtime);
+  const runtimeTarget = target as RuntimeWindow;
+  const existing = runtimeTarget[RUNTIME];
+  if (existing !== undefined) {
+    if (!shared(existing)) throw new Error(CONFLICT);
+    return existing.add(handler);
   }
+
+  const runtime = new Runtime(createHistory(target), reporter(target));
+  Object.defineProperty(runtimeTarget, RUNTIME, {
+    configurable: false,
+    enumerable: false,
+    value: runtime,
+    writable: false,
+  });
   return runtime.add(handler);
 }

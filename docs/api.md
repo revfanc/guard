@@ -42,12 +42,13 @@ interface BackGuard {
 }
 ```
 
-`dispose()` 结束该 Guard 的生命周期，不产生业务导航：
+`dispose()` 请求结束该 Guard：
 
 - 非最后一层可以立即移除。
-- 最后一层会清理 sentinel，并在观察到内部 base `popstate` 后 resolve。
-- 清理期间重复调用返回同一生命周期结果。
-- 同步 History 操作失败时，本次 Promise reject，相关 Guard 停止，后续调用继续 reject。
+- 最后一层会清理 sentinel，并在观察到带相同 generation 的 base `popstate` 后完成。
+- 清理期间重复调用返回同一个 Promise。
+- History ownership 已经丢失时正常完成，不会改写当前 URL 或业务 state。
+- History 清理操作失败时 reject。
 
 主动导航必须等待清理：
 
@@ -63,11 +64,11 @@ await router.push("/next")
 公开 API 不提供 `onError`：
 
 - 创建阶段的错误由 `createBackGuard()` 同步抛出。
-- `dispose()` 直接触发的错误通过其 Promise rejection 返回。
-- handler 未处理异常和 `popstate` 内部故障通过 `window.reportError()` 上报；不支持 `reportError` 的环境使用异步 throw 进入全局错误通道。
-- 外部替换 sentinel 或 Back 越过已知 base 时，库停止相关 Guard，不覆盖当前 URL 与业务 state。
+- `dispose()` 直接触发的错误通过 Promise rejection 返回。
+- handler 未处理异常和 `popstate` 内部故障通过 `window.reportError()` 上报；不支持 `reportError` 的环境使用定时异步 throw 进入全局错误通道。
+- 外部替换 sentinel 或 Back 越过精确 base 时正常结束 Guard，不覆盖当前 URL 与业务 state，也不主动抛错。
 
-业务要忽略或转换 handler 错误时，应在 handler 内自行 `try/catch`。调用 `dispose()` 的代码应按业务需要 await 或 catch。
+业务要忽略或转换 handler 错误时，应在 handler 内自行 `try/catch`。主动导航前应等待 `dispose()` 完成。
 
 ## 类型导出
 

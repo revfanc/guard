@@ -55,6 +55,30 @@ describe("public API", () => {
     await first.dispose();
   });
 
+  it("shares one window runtime across independently evaluated modules", async () => {
+    const addEventListener = vi.spyOn(target(), "addEventListener");
+    vi.resetModules();
+    const firstModule = await import("../../src/index");
+    const firstBack = vi.fn();
+    const first = firstModule.createBackGuard(firstBack);
+
+    vi.resetModules();
+    const secondModule = await import("../../src/index");
+    const secondBack = vi.fn();
+    const second = secondModule.createBackGuard(secondBack);
+
+    expect(
+      addEventListener.mock.calls.filter(([name]) => name === "popstate"),
+    ).toHaveLength(1);
+    target().history.back();
+    await vi.waitFor(() => expect(secondBack).toHaveBeenCalledOnce());
+    expect(firstBack).not.toHaveBeenCalled();
+
+    await expect(second.dispose()).resolves.toBeUndefined();
+    const disposal = first.dispose();
+    await expect(disposal).resolves.toBeUndefined();
+  });
+
   it("is safe to import without a complete browser Window", async () => {
     vi.stubGlobal("window", {});
     vi.resetModules();

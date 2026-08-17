@@ -16,9 +16,5 @@ declare const allow: Parameters<BackHandler>[0];
 createBackGuard({ onBack });
 // @ts-expect-error allow accepts no arguments.
 allow(() => undefined);
-// @ts-expect-error the old unified method must not return.
-guard.resolve();
-// @ts-expect-error legacy lifecycle names must not return.
-guard.done();
 
 void disposal;

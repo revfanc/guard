@@ -21,7 +21,7 @@
 
 排队多次 Back 是硬边界：浏览器先移动历史游标，库无法取消已经排队的后续 traversal。在 `dispose()` cleanup 中同步创建的新 Guard 也要等 base `popstate` 后才激活；此前立即再次 Back 可能越过单 sentinel。
 
-如果 Back 已经越过已知 base，库不会在错误 URL 上强行恢复 sentinel。受影响的 Guard 会停止，当前 URL 与业务 state 保持不变，故障进入浏览器全局错误通道。
+如果 Back 已经越过带有当前 generation 的精确 base，库不会在相同 URL 的其他记录或错误 URL 上强行恢复 sentinel。受影响的 Guard 正常结束，当前 URL 与业务 state 保持不变，不进入浏览器全局错误通道。
 
 如果预期 `popstate` 未出现，`dispose()` Promise 不会完成，排队 Guard 也不会激活。库不会用 timeout 或 `history.length` 猜测遍历成功。
 
@@ -32,11 +32,13 @@
 - `null`；或
 - 普通对象。
 
-primitive、数组、`Map`、`Set` 和类实例会同步抛错。冻结、密封或不可扩展的普通对象可以使用；库在必要时先通过 History API 克隆出可编辑的根对象，不修改传入 state。`__revfanc_guard__` 是本库保留字段，应用和路由器不得写入；当前 state 只要自有该字段，库就会把它视为可接管的 sentinel。
+primitive、数组、`Map`、`Set` 和类实例会同步抛错。冻结、密封或不可扩展的普通对象可以使用；库在必要时先通过 History API 克隆出可编辑的根对象，不修改传入 state。`__revfanc_guard__` 是严格保留字段，marker 包含 generation、base/sentinel 角色和初始 null 信息；已有字段不符合当前协议时同步抛错。
 
-刷新不会被 Guard 拦截。刷新后旧 handler 和 Guard 栈已经消失；应用重新调用 `createBackGuard()` 时，库会接管当前 sentinel，不再调用 `pushState`。应用仍需按原顺序重建所需 Guard。
+刷新不会被 Guard 拦截。刷新后 handler 和 Guard 栈已经消失；应用重新调用 `createBackGuard()` 时，库会恢复当前协议的 sentinel，不再调用 `pushState`。应用仍需按原顺序重建所需 Guard。
 
-sentinel 的创建和清理由浏览器原生 structured clone 完成，保留业务字段、共享引用和循环引用；属性描述符按 structured clone 语义规范化。最后一个 Guard `dispose()` 时，库清除 marker、保留业务 state 与 URL，再遍历回受保护 base。History API 无法删除历史项，因此不承诺恢复 `history.length`。
+sentinel 的创建和清理由浏览器原生 structured clone 完成，保留业务字段、共享引用和循环引用；属性描述符按 structured clone 语义规范化。最后一个 Guard `dispose()` 时，库清除 sentinel marker，遍历到精确 base，再把最新业务 state 写回 base 并移除 base marker。History API 无法删除历史项，因此不承诺恢复 `history.length`。
+
+Guard 活跃期间，外部 `replaceState` 若删除或伪造 marker，库无法在后续 traversal 中恢复被覆盖的源记录；这仍属于不支持范围。主动 state 修改应在 `dispose()` 完成后执行。
 
 ## Router 边界
 

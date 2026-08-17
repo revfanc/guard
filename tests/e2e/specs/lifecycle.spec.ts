@@ -1,4 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
+import { resolve } from "node:path";
+
+const RUNTIME_PATH = resolve(
+  import.meta.dirname,
+  "../../../src/runtime.ts",
+).replaceAll("\\", "/");
 
 async function enterProtected(page: Page): Promise<void> {
   await page.goto("/");
@@ -38,7 +44,7 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("decision")).toHaveText("recreate:done");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toEqual(expect.any(Boolean));
+      .toEqual(expect.any(String));
     await expect.poll(() => page.evaluate(() => history.length)).toBe(length);
 
     await requestBack(page);
@@ -46,7 +52,60 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
   });
 
-  test("reload adopts the current sentinel without growing history", async ({ page }) => {
+  test("independently evaluated modules share the window runtime", async ({ page }) => {
+    await page.evaluate(async (runtimePath) => {
+      const firstUrl = `/@fs/${runtimePath}?first-${crypto.randomUUID()}`;
+      const secondUrl = `/@fs/${runtimePath}?second-${crypto.randomUUID()}`;
+      const first = await import(/* @vite-ignore */ firstUrl) as typeof import("../../../src/runtime");
+      const second = await import(/* @vite-ignore */ secondUrl) as typeof import("../../../src/runtime");
+      const scope = window as Window & {
+        duplicate?: {
+          calls: [number, number];
+          first: ReturnType<typeof first.createGuard>;
+          second: ReturnType<typeof second.createGuard>;
+        };
+      };
+      const calls: [number, number] = [0, 0];
+      scope.duplicate = {
+        calls,
+        first: first.createGuard(window, () => {
+          calls[0] += 1;
+        }),
+        second: second.createGuard(window, () => {
+          calls[1] += 1;
+        }),
+      };
+    }, RUNTIME_PATH);
+
+    await page.evaluate(() => history.back());
+    await expect
+      .poll(() => page.evaluate(() => (
+        window as Window & { duplicate?: { calls: [number, number] } }
+      ).duplicate?.calls))
+      .toEqual([0, 1]);
+
+    await page.evaluate(async () => {
+      const scope = window as Window & {
+        duplicate?: { second: { dispose(): Promise<void> } };
+      };
+      await scope.duplicate?.second.dispose();
+    });
+    await page.evaluate(() => history.back());
+    await expect
+      .poll(() => page.evaluate(() => (
+        window as Window & { duplicate?: { calls: [number, number] } }
+      ).duplicate?.calls))
+      .toEqual([1, 1]);
+
+    await page.evaluate(async () => {
+      const scope = window as Window & {
+        duplicate?: { first: { dispose(): Promise<void> } };
+      };
+      await scope.duplicate?.first.dispose();
+    });
+  });
+
+  test("reload restores the current protocol without growing history", async ({ page }) => {
     const length = await page.evaluate(() => history.length);
     const marker = await page.evaluate(
       () => history.state?.__revfanc_guard__,
@@ -66,6 +125,22 @@ test.describe("Guard lifecycle", () => {
     await page.getByTestId("allow-attempt").dispatchEvent("click");
     await expect(page.getByTestId("page")).toHaveText("Origin");
     await expect(page).toHaveURL(/screen=origin/);
+  });
+
+  test("final disposal writes the latest sentinel state back to base", async ({ page }) => {
+    await page.evaluate(() => {
+      history.replaceState(
+        { ...history.state, latest: { kept: true } },
+        "",
+        location.href,
+      );
+    });
+
+    await page.getByTestId("dispose-guard").dispatchEvent("click");
+    await expect(page.getByTestId("decision")).toHaveText("guard:disposed");
+    await expect
+      .poll(() => page.evaluate(() => history.state))
+      .toEqual({ screen: "protected", latest: { kept: true } });
   });
 
   test("100 dispose and recreate cycles do not grow history", async ({
@@ -93,11 +168,10 @@ test.describe("Guard lifecycle", () => {
     await expect(page.getByTestId("page")).toHaveText("Protected");
   });
 
-  test("external sentinel replacement rejects disposal without losing state", async ({ page }) => {
+  test("external sentinel replacement ends the guard without losing state", async ({ page }) => {
     await page.getByTestId("replace-sentinel").dispatchEvent("click");
-    await expect(page.getByTestId("decision")).toContainText("dispose:false");
-    await expect(page.getByTestId("decision")).toContainText(
-      "sentinel was replaced",
+    await expect(page.getByTestId("decision")).toHaveText(
+      "dispose:done",
     );
     await expect
       .poll(() => page.evaluate(() => history.state))

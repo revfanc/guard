@@ -33,7 +33,7 @@ handler 完成但未调用 `allow()` 时，这次 Back 被拒绝，`allow` 自�
 await guard.dispose()
 ```
 
-非最后一层立即完成。最后一层需要先把当前 sentinel 清理为普通记录，再通过一次同文档遍历回到受保护 base；Promise 在观察到该 `popstate` 后完成。
+非最后一层立即完成。最后一层需要先把当前 sentinel 清理为普通记录，再通过一次同文档遍历回到带有同一 generation 的 base；Promise 在校验并清理该 base 后完成。最新 sentinel 业务 state 会写回当前 base。
 
 主动导航应串行执行：
 
@@ -57,8 +57,8 @@ idle -> active -> cleaning -> idle
 
 `active` 和 `cleaning` 统一使用 `guards`。前者表示当前活动的 Guard，后者表示清理完成后需要激活的 Guard；被清理的最后一层单独保存在 `closing`。
 
-History API 没有遍历完成 Promise。Runtime 只能通过目标 `popstate` 完成 `dispose()` 或继续 Back，不使用 timeout 或 `history.length` 猜测结果。如果浏览器不发送预期事件，Promise 会保持 pending。
+History API 没有遍历完成 Promise。Runtime 只能通过目标 `popstate` 完成 `dispose()` 或继续 Back，不使用 timeout 或 `history.length` 猜测结果。如果浏览器不发送任何事件，Promise 仍会保持 pending；如果收到了非目标 traversal，Guard 正常结束且不改写目标记录。
 
 ## 错误
 
-handler 未处理异常时，库先结束当前决策、保持页面受保护，再交给浏览器全局错误通道。`dispose()` 直接触发的错误通过 Promise rejection 返回。外部替换 sentinel 或 Back 越过已知 base 时，相关 Guard 会停止，库不会在错误 URL 上补写历史。
+handler 未处理异常时，库先结束当前决策、保持页面受保护，再交给浏览器全局错误通道。History 操作失败会使相关 Guard 的 `dispose()` reject；事件回调中的内部失败还会进入全局错误通道。外部替换 sentinel 或 Back 越过精确 base 时，Guard 正常结束，库不会主动抛错，也不会在错误位置补写历史。

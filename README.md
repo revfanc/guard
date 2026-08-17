@@ -35,10 +35,10 @@ next Back creates a new attempt.
 An asynchronous dialog must return its Promise. Repeated Back requests are
 coalesced while that Promise is pending.
 
-`guard.dispose()` stops guarding without navigating. Its Promise resolves after
-the final sentinel cleanup, so active navigation can safely follow it. Unhandled
-handler and internal event errors reach the browser's global error channel;
-errors caused directly by `dispose()` reject its Promise.
+`guard.dispose()` resolves after cleanup. If another navigation has already
+removed the owned history entry, disposal ends normally without rewriting the
+new location or state. Real cleanup failures reject. Unhandled handler errors
+and internal event failures still reach the browser's global error channel.
 
 ## Scope
 
@@ -47,7 +47,8 @@ Supported:
 - native, same-document `history.back()` and `history.go(-1)` attempts;
 - asynchronous decisions without duplicate handler calls;
 - LIFO guards and disposal of any guard layer;
-- sentinel adoption when the application recreates its guards after reload;
+- one coordinated runtime across duplicate modules and hot reloads;
+- current-protocol sentinel restoration after reload;
 - queued teardown/recreation while sentinel cleanup is in progress.
 
 Not guaranteed:

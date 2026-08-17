@@ -1,5 +1,5 @@
 export interface BackGuard {
-  /** Stops guarding and resolves after any sentinel cleanup completes. */
+  /** Stops guarding and waits until the owned history entry is released. */
   dispose(): Promise<void>;
 }
 

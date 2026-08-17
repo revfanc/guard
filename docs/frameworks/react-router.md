@@ -34,7 +34,7 @@ async function goNext() {
   const guard = guardRef.current
   guardRef.current = undefined
 
-  if (guard) await guard.dispose()
+  await guard?.dispose()
   navigate("/next")
 }
 ```

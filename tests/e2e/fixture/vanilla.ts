@@ -102,7 +102,12 @@ export function mountVanillaFixture(): void {
   };
 
   query("enter").addEventListener("click", () => {
-    history.pushState({ screen: "protected" }, "", "/?screen=protected");
+    if (query<HTMLButtonElement>("enter").dataset.sameUrl === "true") {
+      history.replaceState({ screen: "protected", step: 0 }, "", "/?screen=protected");
+      history.pushState({ screen: "protected", step: 1 }, "", "/?screen=protected");
+    } else {
+      history.pushState({ screen: "protected" }, "", "/?screen=protected");
+    }
     query("page").textContent = "Protected";
     query<HTMLButtonElement>("enter").hidden = true;
     query("protected-controls").hidden = false;
@@ -233,7 +238,7 @@ export function mountVanillaFixture(): void {
     void current
       ?.dispose()
       .then(() => {
-        query("decision").textContent = "dispose:true";
+        query("decision").textContent = "dispose:done";
       })
       .catch((error) => {
         query("decision").textContent = `dispose:false:${String(error)}`;

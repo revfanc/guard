@@ -42,4 +42,4 @@ const modalGuard = createBackGuard((allow) => {
 await pageGuard.dispose()
 ```
 
-即使它上方仍有 modal，这个调用也不会替 modal 作决定或触发导航。最后剩下的一层被 dispose 时才需要等待 sentinel cleanup。
+即使它上方仍有 modal，这个调用也不会替 modal 作决定或触发导航。最后剩下的一层被 dispose 时才需要等待 sentinel cleanup；若期间历史已被外部改变，Guard 正常结束且不会改写新的历史位置。

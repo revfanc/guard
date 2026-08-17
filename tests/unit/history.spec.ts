@@ -63,7 +63,7 @@ describe("History", () => {
     expect(target().location.href).toBe(initialUrl);
     expect(sentinel.current()).toBe(true);
     expect(sentinel.base()).toBe(false);
-    expect(current[STATE_KEY]).toBe(false);
+    expect(current[STATE_KEY]).toMatch(/^s:o:/);
     expect(current.self).toBe(current);
     expect(current.left).toBe(current.right);
     expect(state).not.toHaveProperty(STATE_KEY);
@@ -116,29 +116,32 @@ describe("History", () => {
     expect(sentinel.current()).toBe(false);
   });
 
-  it("preserves business fields added to a sentinel that began at null", () => {
+  it("preserves the latest sentinel state on the settled base", async () => {
     const sentinel = createHistory(target()).create();
     const current = target().history.state as Record<string, unknown>;
     current.route = "external";
     target().history.replaceState(current, "", target().location.href);
-    vi.spyOn(target().history, "back").mockImplementation(() => undefined);
+    const changed = nextChange(createHistory(target()));
 
     sentinel.release();
+    await changed;
+    sentinel.settle();
 
     expect(target().history.state).toEqual({ route: "external" });
   });
 
-  it("recognizes its base and restores from the current clean state", async () => {
+  it("recognizes its exact base and restores from its latest business state", async () => {
     const history = createHistory(target());
     const sentinel = history.create();
     const changed = nextChange(history);
 
-    sentinel.release();
+    target().history.back();
     await changed;
 
     expect(sentinel.base()).toBe(true);
+    const base = target().history.state as Record<string, unknown>;
     target().history.replaceState(
-      { route: "latest", nested: { saved: true } },
+      { ...base, route: "latest", nested: { saved: true } },
       "",
       target().location.href,
     );
@@ -151,7 +154,7 @@ describe("History", () => {
     });
   });
 
-  it("adopts a current sentinel without pushing another entry", () => {
+  it("restores a current-protocol sentinel without pushing another entry", () => {
     const history = createHistory(target());
     const first = history.create();
     const marker = (target().history.state as Record<string, unknown>)[STATE_KEY];
@@ -159,16 +162,45 @@ describe("History", () => {
     const pushState = vi.mocked(target().history.pushState);
     const calls = pushState.mock.calls.length;
 
-    const adopted = createHistory(target()).create();
+    const restored = createHistory(target()).create();
 
     expect(first.current()).toBe(true);
-    expect(adopted.current()).toBe(true);
+    expect(restored.current()).toBe(true);
     expect(target().history.length).toBe(length);
     expect(pushState).toHaveBeenCalledTimes(calls);
     expect((target().history.state as Record<string, unknown>)[STATE_KEY]).toBe(
       marker,
     );
-    expect(marker).toBe(true);
+    expect(marker).toMatch(/^s:n:/);
+  });
+
+  it("rejects an occupied reserved key", () => {
+    target().history.replaceState(
+      { route: "editor", [STATE_KEY]: true },
+      "",
+      target().location.href,
+    );
+
+    expect(() => createHistory(target()).create()).toThrow("reserved guard key");
+    expect(target().history.state).toEqual({
+      route: "editor",
+      [STATE_KEY]: true,
+    });
+  });
+
+  it("does not mistake an older same-URL entry for its exact base", async () => {
+    target().history.replaceState({ step: 0 }, "", "/same");
+    target().history.pushState({ step: 1 }, "", "/same");
+    const history = createHistory(target());
+    const sentinel = history.create();
+    const changed = nextChange(history);
+
+    target().history.go(-2);
+    await changed;
+
+    expect(sentinel.base()).toBe(false);
+    expect(() => sentinel.restore()).toThrow("sentinel was replaced");
+    expect(target().history.state).toEqual({ step: 0 });
   });
 
   it.each([
@@ -199,7 +231,7 @@ describe("History", () => {
     expect(pushState).toHaveBeenCalledTimes(calls + 1);
     expect(target().history.state).toEqual({
       route: "editor",
-      [STATE_KEY]: false,
+      [STATE_KEY]: expect.stringMatching(/^s:o:/),
     });
   });
 

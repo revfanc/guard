@@ -11,9 +11,10 @@ const NO_FAILURE = Symbol("no failure");
 
 class FakeSentinel implements Sentinel {
   atSentinel = true;
-  atBase = true;
+  atBase = false;
   restoreFailure: unknown;
   releaseFailure: unknown = NO_FAILURE;
+  settleFailure: unknown = NO_FAILURE;
   readonly restore = vi.fn((): void => {
     if (this.restoreFailure) throw this.restoreFailure;
     if (!this.base()) throw new Error("not at base");
@@ -24,6 +25,11 @@ class FakeSentinel implements Sentinel {
     if (!this.atSentinel) throw new Error("sentinel was replaced");
     if (this.releaseFailure !== NO_FAILURE) throw this.releaseFailure;
     this.atSentinel = false;
+  });
+  readonly settle = vi.fn((): void => {
+    if (!this.atBase) throw new Error("not at base");
+    if (this.settleFailure !== NO_FAILURE) throw this.settleFailure;
+    this.atBase = false;
   });
 
   current(): boolean {
@@ -186,7 +192,7 @@ describe("Runtime", () => {
     const disposed = guard.dispose();
     history.emitBase();
     expect(history.back).toHaveBeenCalledOnce();
-    await disposed;
+    await expect(disposed).resolves.toBeUndefined();
     decision.resolve();
   });
 
@@ -362,18 +368,17 @@ describe("Runtime", () => {
     await disposed;
   });
 
-  it("invalidates a generation when its sentinel was externally replaced", async () => {
+  it("ends a generation without treating external replacement as an error", async () => {
     const guard = runtime.add(vi.fn());
     currentSentinel().atSentinel = false;
 
-    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
+    await expect(guard.dispose()).resolves.toBeUndefined();
     expect(history.reportError).not.toHaveBeenCalled();
-    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
     runtime.add(vi.fn());
     expect(history.sentinels).toHaveLength(2);
   });
 
-  it("reports ownership loss discovered by allow", async () => {
+  it("ends ownership lost during allow without reporting it", async () => {
     const decision = deferred();
     let allowBack: (() => boolean) | undefined;
     const guard = runtime.add((current) => {
@@ -384,14 +389,12 @@ describe("Runtime", () => {
     currentSentinel().atSentinel = false;
 
     expect(allowBack?.()).toBe(false);
-    expect(history.reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: expect.stringContaining("sentinel was replaced") }),
-    );
-    await expect(guard.dispose()).rejects.toThrow("sentinel was replaced");
+    expect(history.reportError).not.toHaveBeenCalled();
+    await expect(guard.dispose()).resolves.toBeUndefined();
     decision.resolve();
   });
 
-  it("invalidates a generation when sentinel restoration fails", async () => {
+  it("rejects the generation when sentinel restoration fails", async () => {
     const error = new Error("restore failed");
     const guard = runtime.add(vi.fn());
     currentSentinel().restoreFailure = error;
@@ -401,7 +404,7 @@ describe("Runtime", () => {
     await expect(guard.dispose()).rejects.toBe(error);
   });
 
-  it("invalidates queued guards when sentinel recreation fails", async () => {
+  it("rejects queued guards when sentinel recreation fails", async () => {
     const old = runtime.add(vi.fn());
     const oldDisposed = old.dispose();
     const error = new Error("create failed");
@@ -414,15 +417,13 @@ describe("Runtime", () => {
     await expect(replacement.dispose()).rejects.toBe(error);
   });
 
-  it("does not consume a change that misses the known base", async () => {
+  it("does not consume or report a change that misses the known base", async () => {
     const guard = runtime.add(vi.fn());
     const intercept = history.emit({ external: true });
 
     expect(intercept).not.toHaveBeenCalled();
-    expect(history.reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: expect.stringContaining("guarded base") }),
-    );
-    await expect(guard.dispose()).rejects.toThrow("guarded base");
+    expect(history.reportError).not.toHaveBeenCalled();
+    await expect(guard.dispose()).resolves.toBeUndefined();
   });
 
   it("reports a final physical Back failure after closing the guard", async () => {
@@ -439,7 +440,7 @@ describe("Runtime", () => {
     expect(allowBack?.()).toBe(true);
     const disposed = guard.dispose();
     history.emitBase();
-    await disposed;
+    await expect(disposed).rejects.toBe(error);
     expect(history.reportError).toHaveBeenCalledWith(error);
     decision.resolve();
   });

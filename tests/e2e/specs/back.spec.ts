@@ -80,7 +80,7 @@ test.describe("Back decisions", () => {
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toEqual(expect.any(Boolean));
+      .toEqual(expect.any(String));
     await requestBack(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
     await expect(page.getByTestId("page")).toHaveText("Protected");
@@ -119,12 +119,12 @@ test.describe("Back decisions", () => {
     expect([1, 2]).toContain(result.popstates);
     if (result.screen === "protected") {
       expect(result.page).toBe("Protected");
-      expect(result.marker).toEqual(expect.any(Boolean));
+      expect(result.marker).toEqual(expect.any(String));
       expect(result.state).toMatchObject({ screen: "protected" });
     } else {
       expect(result.screen).toBe("origin");
       expect(result.page).toBe("Origin");
-      expect(result.decision).toContain("missed the guarded base");
+      expect(result.decision).not.toContain("error:");
       expect(result.marker).toBeUndefined();
       expect(result.state).toEqual({ screen: "origin" });
     }
@@ -134,12 +134,27 @@ test.describe("Back decisions", () => {
     await page.evaluate(() => history.go(-2));
 
     await expect(page).toHaveURL(/screen=origin/, { timeout: 15_000 });
-    await expect(page.getByTestId("decision")).toContainText(
-      "missed the guarded base",
-    );
+    await expect(page.getByTestId("decision")).not.toContainText("error:");
     await expect(page.getByTestId("a-attempts")).toHaveText("0");
     await expect
       .poll(() => page.evaluate(() => history.state))
       .toEqual({ screen: "origin" });
+  });
+
+  test("history.go(-2) does not mistake an older same-URL entry for base", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("enter").evaluate((button) => {
+      button.dataset.sameUrl = "true";
+    });
+    await page.getByTestId("enter").click();
+    await expect(page.getByTestId("page")).toHaveText("Protected");
+
+    await page.evaluate(() => history.go(-2));
+
+    await expect(page.getByTestId("decision")).not.toContainText("error:");
+    await expect(page.getByTestId("a-attempts")).toHaveText("0");
+    await expect
+      .poll(() => page.evaluate(() => history.state))
+      .toEqual({ screen: "protected", step: 0 });
   });
 });
