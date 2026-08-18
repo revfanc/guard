@@ -1,43 +1,14 @@
 # 工程结构与构建
 
-## 工具职责
+核心源码保持三层：
 
-- tsdown：npm 库打包、ESM/CommonJS 和类型声明。
-- Vitest：状态机与 History 协议单测。
-- Playwright：Chromium、Firefox、WebKit 的真实浏览器验证。
-- VitePress：指南与 API 文档。
+- `index.ts`：Vue 插件、注入、作用域清理和公开导出；
+- `router.ts`：把 Vue Router history、`beforeEach`、`afterEach` 适配为内部接口；
+- `runtime.ts`：Item 栈、Attempt 决策和 pending POP 协调。
 
-## 目录
+Runtime 通过 `globalThis` 上的全局 `WeakMap` 按 Router 实例共享，支持重复模块和 HMR，同时不在 Router 对象上附加字段。Router 被垃圾回收后，对应 Runtime 也不会被注册表强引用。
 
-```text
-guard/
-├─ src/
-│  ├─ index.ts             # 唯一公开入口
-│  ├─ types.ts             # BackHandler / BackGuard
-│  ├─ history.ts           # generation、base/sentinel 与 History API 副作用
-│  └─ runtime.ts           # window 协调器、active、cleaning 与 LIFO
-├─ tests/
-│  ├─ unit/                # 确定性的边界与异常测试
-│  └─ e2e/                 # 三浏览器原生 History fixture
-├─ docs/                   # VitePress 文档
-├─ scripts/                # tarball、exports 与 tree-shaking 检查
-└─ tsdown.config.ts        # ESM + CJS + declarations
-```
-
-只有 `src/index.ts` 是公开模块。内部保持 `idle`、`active`、`cleaning` 三阶段；公开 API 不暴露阶段、终态或 History marker。
-
-## 核心边界
-
-- `index.ts` 只校验公开输入和浏览器能力。
-- `history.ts` 封装 generation marker、`pushState`、`replaceState`、`popstate` 与 Back，不处理 Guard 栈。
-- `runtime.ts` 通过 window 级版本化协调器共享一个 `Adapter`，负责 `guards`、`allow()`、`dispose()` 和错误生命周期。
-
-## 发布约束
-
-- `exports.import` 与 `exports.require` 分别提供 ESM/CJS 和匹配声明。
-- 目标为 ES2015，不能无意依赖更晚运行时 API。
-- `sideEffects: false` 要求模块导入时不安装监听器。
-- 发布检查从真实 tarball 验证文件列表、入口、类型和 tree-shaking。
+构建输出包含 ESM、CommonJS 和各自的类型声明。包声明 `sideEffects: false`，Vue 与 Vue Router 均为 peer dependency。
 
 ```bash
 pnpm check

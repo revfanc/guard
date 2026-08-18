@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "Guard"
-  text: "让返回先停一下"
-  tagline: 用一条 sentinel 接住原生单步 Back，业务只需决定是否允许。
+  text: "让 Vue Router 的 POP 先做决定"
+  tagline: 用插件绑定 Router，在组件中用一层 Guard 处理 Back、Forward 和 go(N)。
   actions:
     - theme: brand
       text: 开始使用
@@ -13,26 +13,24 @@ hero:
       text: 查看 API
       link: /api
 features:
-  - title: 明确的返回决策
-    details: 调用 allow() 就同意当前 Back；不调用就继续保护。
-  - title: 可等待的生命周期
-    details: dispose() 等待 sentinel 清理；所有权已经丢失时正常结束，真实清理故障则 reject。
-  - title: 原生 History API
-    details: 聚焦同文档单步 Back，不假装提供 router POP 或浏览器级导航锁。
+  - title: Vue Router 原生语义
+    details: 只识别 RouterHistory 的 POP，由 beforeEach 返回 false 或放行原导航。
+  - title: 组件作用域
+    details: useGuard 返回幂等停止函数，并通过 onScopeDispose 自动清理。
+  - title: 多层 LIFO
+    details: 每次 POP 只交给栈顶 Handler，适合对话框和嵌套流程逐层关闭。
 ---
 
 ## 最小接入
 
 ```ts
-import { createBackGuard } from "@revfanc/guard"
+import { useGuard } from "@revfanc/guard"
 
-const guard = createBackGuard(async (allow) => {
-  if (await confirmLeaving()) {
-    allow()
-  }
+useGuard(async (allow) => {
+  if (await confirmLeaving()) allow()
 })
 ```
 
-::: warning 它不是浏览器级锁
-只保证协调原生、同文档、逐次单步 Back。刷新本身不会被拦截，但重新创建 Guard 时会接管当前 sentinel。Router POP、关闭、地址栏、跨文档、跨多步跳转和一次 traversal 完成前排队的多次 Back 不在保证范围内。
+::: warning 能力边界
+本库只处理 Vue Router POP：Back、Forward 和 `go(N)`。`push`、`replace`、刷新、地址栏和跨文档导航不在处理范围内。
 :::

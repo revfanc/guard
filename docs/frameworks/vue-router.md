@@ -1,42 +1,52 @@
-# Vue 生命周期示例
+# Vue Router
 
-这是组件生命周期示例，不是 Vue Router POP 兼容承诺。需要拦截应用内路由跳转时，请使用 Vue Router 导航守卫。
+## Router 配置
+
+```ts
+// router.ts
+import { createRouter, createWebHistory } from "vue-router"
+
+export const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: "/editor", component: () => import("./Editor.vue") },
+    { path: "/home", component: () => import("./Home.vue") },
+  ],
+})
+```
+
+## 应用安装
+
+```ts
+import { createApp } from "vue"
+import { createGuard } from "@revfanc/guard"
+import { router } from "./router"
+import App from "./App.vue"
+
+const app = createApp(App)
+
+app.use(router)
+app.use(createGuard(router))
+app.mount("#app")
+```
+
+## 组件使用
 
 ```vue
 <script setup lang="ts">
-import { onMounted, onUnmounted, shallowRef } from "vue"
-import { createBackGuard, type BackGuard } from "@revfanc/guard"
+import { useGuard } from "@revfanc/guard"
+import { ref } from "vue"
 
-const guard = shallowRef<BackGuard>()
+const dirty = ref(true)
 
-onMounted(() => {
-  guard.value = createBackGuard(async (allow) => {
-    if (await confirmLeaving()) {
-      allow()
-    }
-  })
-})
-
-onUnmounted(() => {
-  const current = guard.value
-  guard.value = undefined
-  void current?.dispose().catch(reportError)
+useGuard(async (allow) => {
+  if (!dirty.value || await confirmLeaving()) {
+    allow()
+  }
 })
 </script>
 ```
 
-异步确认必须由 handler 返回。未调用 `allow()` 就完成 handler，表示拒绝本次 Back 并重新布防。
+只有 POP 会触发 Handler。代码中的 `router.push()` 和 `router.replace()` 会正常通过；如果它们也需要确认，请使用 Vue Router 自身的导航守卫实现业务规则。
 
-主动 router 导航应等待本库清理：
-
-```ts
-async function goNext() {
-  const current = guard.value
-  guard.value = undefined
-
-  await current?.dispose()
-  await router.push("/next")
-}
-```
-
-这只协调本库 sentinel 与主动 push。库不保证 Vue Router POP、导航守卫顺序或 router 与原生 `popstate` 监听器的先后。创建 Guard 前还需确认当前 `history.state` 满足[严格输入契约](../guide/limitations#historystate-契约)。
+Browser、Hash 和 Memory history 使用相同的 Guard API。

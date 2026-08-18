@@ -1,7 +1,7 @@
 {
   "name": "@revfanc/guard",
-  "version": "0.6.0",
-  "description": "A small, framework-agnostic browser back guard.",
+  "version": "0.7.0",
+  "description": "A small Vue Router POP navigation guard.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -43,8 +43,8 @@
     "prepack": "pnpm build"
   },
   "keywords": [
-    "browser",
-    "back-button",
+    "vue",
+    "vue-router",
     "history-api",
     "navigation",
     "guard"
@@ -63,6 +63,10 @@
     "access": "public"
   },
   "packageManager": "pnpm@10.33.0",
+  "peerDependencies": {
+    "vue": "^3.5.0",
+    "vue-router": "^4.5.0 || ^5.0.0"
+  },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@eslint/js": "^10.0.1",
@@ -81,7 +85,9 @@
     "vite": "^8.2.1",
     "vitepress": "2.0.0-alpha.19",
     "vitest": "^4.1.10",
-    "vue": "^3.5.41"
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0",
+    "vue-router4": "npm:vue-router@4.5.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -1,65 +1,58 @@
 # @revfanc/guard
 
-A small browser-back guard for the native History API.
+A small Vue Router POP navigation guard.
 
-- ES2015-compatible runtime
-- ESM and CommonJS exports
-- Tree-shakeable, with no runtime dependencies
-- Typed with TypeScript
+- Vue 3.5+
+- Vue Router 4.5+ or 5
+- Browser, hash, and memory history
+- Back, Forward, and `go(N)`
+- ESM and CommonJS, typed with TypeScript
 
 ```bash
 pnpm add @revfanc/guard
 ```
 
-```ts
-import { createBackGuard } from "@revfanc/guard"
+Install the plugin once with the same Router instance used by the app:
 
-const guard = createBackGuard(async (allow) => {
+```ts
+import { createApp } from "vue"
+import { createGuard } from "@revfanc/guard"
+import { router } from "./router"
+import App from "./App.vue"
+
+const app = createApp(App)
+const guard = createGuard(router)
+
+app.use(router)
+app.use(guard)
+app.mount("#app")
+```
+
+Register a layer from a component or composable:
+
+```ts
+import { useGuard } from "@revfanc/guard"
+
+const stop = useGuard(async (allow) => {
   if (await confirmLeaving()) {
     allow()
   }
 })
 
-// Await cleanup before an active navigation.
-await guard.dispose()
-await router.push("/next")
+// Optional. The current Vue scope also stops it automatically.
+stop()
 ```
 
-The library adds one same-URL sentinel entry. A single-step Back returns to the
-protected entry, restores the sentinel, and calls the handler. Calling
-`allow()` accepts that Back; when it is the final guard, the library
-cleans its sentinel and continues the original Back automatically. If the
-handler settles without calling `allow()`, the page stays protected and the
-next Back creates a new attempt.
+Only the top layer handles a POP. Calling `allow()` consumes that layer. If a
+lower layer remains, Vue Router cancels the current POP; otherwise the original
+POP completes. Settling without `allow()` rejects the POP and keeps the layer.
 
-An asynchronous dialog must return its Promise. Repeated Back requests are
-coalesced while that Promise is pending.
+The package does not guard `push`, `replace`, reload, address-bar navigation, or
+cross-document navigation. It does not write `history.state`.
 
-`guard.dispose()` resolves after cleanup. If another navigation has already
-removed the owned history entry, disposal ends normally without rewriting the
-new location or state. Real cleanup failures reject. Unhandled handler errors
-and internal event failures still reach the browser's global error channel.
-
-## Scope
-
-Supported:
-
-- native, same-document `history.back()` and `history.go(-1)` attempts;
-- asynchronous decisions without duplicate handler calls;
-- LIFO guards and disposal of any guard layer;
-- one coordinated runtime across duplicate modules and hot reloads;
-- current-protocol sentinel restoration after reload;
-- queued teardown/recreation while sentinel cleanup is in progress.
-
-Not guaranteed:
-
-- Vue Router, React Router, or another router's POP behavior and listener order;
-- blocking reload, tab close, address-bar, or cross-document navigation;
-- long-press history selection, `history.go(-N)`, or queued rapid Back requests;
-- forward navigation or external `pushState` / `replaceState` while active.
-
-Use a router's own navigation guard or blocker when router POP must be covered.
-See the [browser and state boundaries](https://revfanc.github.io/guard/guide/limitations).
+`RouterHistory.listen()` is currently marked Alpha by Vue Router. The peer range
+is intentionally limited to versions below 6 and the behavior is integration
+tested against Vue Router 4.5.1 and 5.
 
 ## Development
 

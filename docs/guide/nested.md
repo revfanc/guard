@@ -1,45 +1,22 @@
 # 多层 Guard
 
-多个 Guard 按后创建优先（LIFO）工作。一次 Back 只交给当前栈顶，不会替其他层作决定。
+多个 Guard 按注册顺序组成 LIFO 栈。一次 POP 只处理一层，不会在同一次导航里连续调用多个 Handler。
+
+例如页面表单上方又打开确认框：
 
 ```ts
-let pageAllow: (() => boolean) | undefined
-
-const pageGuard = createBackGuard((allow) => {
-  pageAllow = allow
-  return showPageExitDialog().then((confirmed) => {
-    if (confirmed) allow()
-  })
+// 页面层先注册
+useGuard(async (allow) => {
+  if (await confirmLeavingForm()) allow()
 })
 
-const modalGuard = createBackGuard((allow) => {
-  return showModalDialog().then((close) => {
-    if (close) {
-      closeModal()
-      allow()
-    }
-  })
+// 对话框层后注册
+useGuard((allow) => {
+  closeDialog()
+  allow()
 })
 ```
 
-## 决策暂停
+首次 Back 调用对话框层。它调用 `allow()` 后被消费，但因为还有页面层，当前 POP 被 Vue Router 拒绝，地址保持不变。再次 Back 才调用页面层。
 
-如果 `pageGuard` 已有 pending 决策，随后创建 `modalGuard`，页面决策会暂停。暂停期间 `pageAllow()` 返回 `false`。
-
-上层 Guard 被 dispose 后，只要页面 handler 的 Promise 仍 pending，原 `allow` 就能恢复；如果 Promise 已完成，原 `allow` 已失效，下一次 Back 会重新调用页面 handler。
-
-## `allow()` 只完成栈顶层
-
-非最后一层调用 `allow()` 时，只移除该逻辑层并消费本次 Back，不会继续物理 Back，也不会触发下层 handler。弹窗关闭等局部业务动作应在 `allow()` 前执行。
-
-只有最后一层 `allow()` 才会清理 sentinel 并自动继续原始 Back。
-
-## `dispose()` 可以跨层
-
-`dispose()` 是生命周期操作，可以移除任意层：
-
-```ts
-await pageGuard.dispose()
-```
-
-即使它上方仍有 modal，这个调用也不会替 modal 作决定或触发导航。最后剩下的一层被 dispose 时才需要等待 sentinel cleanup；若期间历史已被外部改变，Guard 正常结束且不会改写新的历史位置。
+主动关闭某一层时，调用对应的停止函数即可；停止非栈顶层不会影响其他层。

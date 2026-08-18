@@ -1,447 +1,208 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  Adapter,
-  Sentinel,
-} from "../../src/history";
+import type { Adapter, Before, Pop } from "../../src/router";
 import { Runtime } from "../../src/runtime";
 
-const BASE_STATE = Symbol("base");
-const SENTINEL_STATE = Symbol("sentinel");
-const NO_FAILURE = Symbol("no failure");
+class Fake implements Adapter {
+  readonly afterCleanup = vi.fn();
+  readonly beforeCleanup = vi.fn();
+  readonly listenCleanup = vi.fn();
+  private afterHandler?: (to: string, from: string) => void;
+  private beforeHandler?: Before;
+  private popHandler?: (pop: Pop) => void;
+  private value = "/current";
 
-class FakeSentinel implements Sentinel {
-  atSentinel = true;
-  atBase = false;
-  restoreFailure: unknown;
-  releaseFailure: unknown = NO_FAILURE;
-  settleFailure: unknown = NO_FAILURE;
-  readonly restore = vi.fn((): void => {
-    if (this.restoreFailure) throw this.restoreFailure;
-    if (!this.base()) throw new Error("not at base");
-    this.atSentinel = true;
-    this.atBase = false;
-  });
-  readonly release = vi.fn((): void => {
-    if (!this.atSentinel) throw new Error("sentinel was replaced");
-    if (this.releaseFailure !== NO_FAILURE) throw this.releaseFailure;
-    this.atSentinel = false;
-  });
-  readonly settle = vi.fn((): void => {
-    if (!this.atBase) throw new Error("not at base");
-    if (this.settleFailure !== NO_FAILURE) throw this.settleFailure;
-    this.atBase = false;
-  });
-
-  current(): boolean {
-    return this.atSentinel;
+  after(listener: (to: string, from: string) => void): () => void {
+    this.afterHandler = listener;
+    return this.afterCleanup;
   }
 
-  base(): boolean {
-    return this.atBase;
-  }
-}
-
-class FakeHistory implements Adapter {
-  readonly sentinels: FakeSentinel[] = [];
-  readonly reportError = vi.fn();
-  readonly back = vi.fn(() => {
-    if (this.backFailure) throw this.backFailure;
-  });
-  createFailure: unknown;
-  backFailure: unknown;
-  private listener?: (intercept: () => void) => void;
-
-  create(): Sentinel {
-    if (this.createFailure) throw this.createFailure;
-    const sentinel = new FakeSentinel();
-    this.sentinels.push(sentinel);
-    return sentinel;
+  before(listener: Before): () => void {
+    this.beforeHandler = listener;
+    return this.beforeCleanup;
   }
 
-  listen(listener: (intercept: () => void) => void): void {
-    this.listener = listener;
+  listen(listener: (pop: Pop) => void): () => void {
+    this.popHandler = listener;
+    return this.listenCleanup;
   }
 
-  emit(state: unknown): ReturnType<typeof vi.fn> {
-    const intercept = vi.fn();
-    const sentinel = this.sentinels[this.sentinels.length - 1];
-    if (sentinel) {
-      sentinel.atSentinel = state === SENTINEL_STATE;
-      sentinel.atBase = state === BASE_STATE;
-    }
-    this.listener?.(intercept);
-    return intercept;
+  pop(to = "/before", from = "/current", delta = -1): void {
+    this.value = to;
+    this.popHandler?.({ delta, from, to });
   }
 
-  emitBase(): ReturnType<typeof vi.fn> {
-    return this.emit(BASE_STATE);
+  place(): string {
+    return this.value;
+  }
+
+  async wait(place: string): Promise<void> {
+    await vi.waitFor(() => expect(this.value).not.toBe(place));
+  }
+
+  restore(to: string): void {
+    this.value = to;
+  }
+
+  route(
+    to = "/before",
+    from = "/current",
+  ): boolean | void | PromiseLike<boolean | void> {
+    return this.beforeHandler?.(to, from);
+  }
+
+  settle(to = "/before", from = "/current"): void {
+    this.afterHandler?.(to, from);
   }
 }
 
 function deferred(): {
   promise: Promise<void>;
   resolve(): void;
-  reject(error: unknown): void;
 } {
   let resolve!: () => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<void>((onResolve, onReject) => {
-    resolve = onResolve;
-    reject = onReject;
+  const promise = new Promise<void>((current) => {
+    resolve = current;
   });
-  return { promise, resolve, reject };
+  return { promise, resolve };
 }
 
-let history: FakeHistory;
+let adapter: Fake;
 let runtime: Runtime;
 
-function currentSentinel(): FakeSentinel {
-  const sentinel = history.sentinels[history.sentinels.length - 1];
-  if (!sentinel) throw new Error("missing fake sentinel");
-  return sentinel;
-}
-
 beforeEach(() => {
-  history = new FakeHistory();
-  runtime = new Runtime(history, history.reportError);
+  adapter = new Fake();
+  runtime = new Runtime(adapter);
 });
 
 describe("Runtime", () => {
-  it("shares one sentinel and re-arms after a handler settles without allow", () => {
-    const firstBack = vi.fn();
-    const secondBack = vi.fn();
-    const first = runtime.add(firstBack);
-    const second = runtime.add(secondBack);
+  it("ignores navigation without matching POP metadata", () => {
+    const handler = vi.fn();
+    runtime.add(handler);
 
-    expect(history.sentinels).toHaveLength(1);
-    expect(history.emitBase()).toHaveBeenCalledOnce();
-    history.emitBase();
-    expect(secondBack).toHaveBeenCalledTimes(2);
-    expect(firstBack).not.toHaveBeenCalled();
-
-    void second.dispose();
-    const disposed = first.dispose();
-    history.emitBase();
-    return disposed;
+    expect(adapter.route("/push", "/current")).toBeUndefined();
+    expect(handler).not.toHaveBeenCalled();
   });
 
-  it("expires allow when a synchronous handler settles", async () => {
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((allow) => {
-      allowBack = allow;
+  it("keeps the top item when its handler does not allow", async () => {
+    const handler = vi.fn();
+    runtime.add(handler);
+
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(false);
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(false);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows the POP after consuming the final item", async () => {
+    const handler = vi.fn((allow: () => void) => allow());
+    runtime.add(handler);
+
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(true);
+    adapter.pop();
+    expect(adapter.route()).toBeUndefined();
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("consumes one LIFO layer per POP", async () => {
+    const calls: string[] = [];
+    runtime.add((allow) => {
+      calls.push("outer");
+      allow();
+    });
+    runtime.add((allow) => {
+      calls.push("inner");
+      allow();
     });
 
-    history.emitBase();
-    expect(allowBack?.()).toBe(false);
-
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(false);
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(true);
+    expect(calls).toEqual(["inner", "outer"]);
   });
 
-  it("accepts a synchronous allow only once", async () => {
-    const accepted: boolean[] = [];
-    const guard = runtime.add((allow) => {
-      accepted.push(allow(), allow());
-    });
-
-    history.emitBase();
-    expect(accepted).toEqual([true, false]);
-
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
-  });
-
-  it("coalesces repeated Back while an asynchronous decision is pending", async () => {
+  it("does not dispatch another handler while one is pending", async () => {
     const decision = deferred();
-    const onBack = vi
-      .fn<(allow: () => boolean) => void | PromiseLike<void>>()
-      .mockImplementationOnce(() => decision.promise)
-      .mockImplementation(() => undefined);
-    const guard = runtime.add(onBack);
+    const handler = vi.fn(() => decision.promise);
+    runtime.add(handler);
 
-    history.emitBase();
-    history.emitBase();
-    expect(onBack).toHaveBeenCalledOnce();
+    adapter.pop("/first");
+    const first = adapter.route("/first");
+    adapter.pop("/second", "/first");
+    const second = adapter.route("/second", "/current");
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
 
     decision.resolve();
-    await decision.promise;
-    await Promise.resolve();
-    history.emitBase();
-    expect(onBack).toHaveBeenCalledTimes(2);
-
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
+    await expect(first).resolves.toBe(false);
+    adapter.restore("/first");
+    await expect(second).resolves.toBe(false);
   });
 
-  it("allows the final Back only after sentinel cleanup reaches its base", async () => {
+  it("stopping the active item invalidates allow and rejects the POP", async () => {
     const decision = deferred();
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
+    let allow: (() => void) | undefined;
+    const stop = runtime.add((current) => {
+      allow = current;
       return decision.promise;
     });
 
-    history.emitBase();
-    expect(allowBack?.()).toBe(true);
-    expect(currentSentinel().release).toHaveBeenCalledOnce();
-    expect(history.back).not.toHaveBeenCalled();
+    adapter.pop();
+    const navigation = adapter.route();
+    await vi.waitFor(() => expect(allow).toBeTypeOf("function"));
+    stop();
+    allow?.();
 
-    const disposed = guard.dispose();
-    history.emitBase();
-    expect(history.back).toHaveBeenCalledOnce();
-    await expect(disposed).resolves.toBeUndefined();
+    await expect(navigation).resolves.toBe(false);
     decision.resolve();
+    expect(adapter.afterCleanup).toHaveBeenCalledOnce();
+    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
+    expect(adapter.listenCleanup).toHaveBeenCalledOnce();
   });
 
-  it("keeps a lower pending attempt paused until the upper guard is gone", async () => {
-    const outerDecision = deferred();
-    const innerDecision = deferred();
-    let outerAllow: (() => boolean) | undefined;
-    const outer = runtime.add((allow) => {
-      outerAllow = allow;
-      return outerDecision.promise;
-    });
-    history.emitBase();
-
-    const inner = runtime.add(() => innerDecision.promise);
-    history.emitBase();
-    expect(outerAllow?.()).toBe(false);
-
-    await inner.dispose();
-    expect(outerAllow?.()).toBe(true);
-    const disposed = outer.dispose();
-    history.emitBase();
-    await disposed;
-    outerDecision.resolve();
-    innerDecision.resolve();
-  });
-
-  it("allows a top logical layer without continuing the physical Back", async () => {
-    const decision = deferred();
+  it("returns an idempotent stop function for any layer", async () => {
     const outer = runtime.add(vi.fn());
-    let innerAllow: (() => boolean) | undefined;
-    const inner = runtime.add((allow) => {
-      innerAllow = allow;
-      return decision.promise;
-    });
+    const inner = runtime.add((allow) => allow());
 
-    history.emitBase();
-    expect(innerAllow?.()).toBe(true);
-    expect(currentSentinel().release).not.toHaveBeenCalled();
-    expect(history.back).not.toHaveBeenCalled();
-    await inner.dispose();
+    outer();
+    outer();
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(true);
+    inner();
 
-    const disposed = outer.dispose();
-    history.emitBase();
-    await disposed;
-    decision.resolve();
+    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
   });
 
-  it("disposes any layer and awaits cleanup only for the final layer", async () => {
-    const outer = runtime.add(vi.fn());
-    const inner = runtime.add(vi.fn());
-
-    await outer.dispose();
-    expect(currentSentinel().release).not.toHaveBeenCalled();
-
-    let settled = false;
-    const disposed = inner.dispose().then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    history.emitBase();
-    await disposed;
-    expect(settled).toBe(true);
-  });
-
-  it("queues recreate during final disposal and creates one new sentinel", async () => {
-    const old = runtime.add(vi.fn());
-    const oldDisposed = old.dispose();
-    const replacementBack = vi.fn();
-    const replacement = runtime.add(replacementBack);
-    const cancelled = runtime.add(vi.fn());
-    await cancelled.dispose();
-
-    expect(history.sentinels).toHaveLength(1);
-    history.emitBase();
-    await oldDisposed;
-    expect(history.sentinels).toHaveLength(2);
-
-    history.emitBase();
-    expect(replacementBack).toHaveBeenCalledOnce();
-    const disposed = replacement.dispose();
-    history.emitBase();
-    await disposed;
-  });
-
-  it("rejects new guards after the final Back has been allowed", async () => {
-    const decision = deferred();
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
-      return decision.promise;
-    });
-    history.emitBase();
-
-    expect(allowBack?.()).toBe(true);
-    expect(() => runtime.add(vi.fn())).toThrow(
-      "a Back navigation is already being allowed",
-    );
-
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
-    decision.resolve();
-  });
-
-  it("fails closed when disposal cannot release the sentinel", async () => {
-    const error = new Error("back failed");
-    const guard = runtime.add(vi.fn());
-    const sentinel = currentSentinel();
-    sentinel.releaseFailure = error;
-
-    await expect(guard.dispose()).rejects.toBe(error);
-    await expect(guard.dispose()).rejects.toBe(error);
-    expect(history.reportError).not.toHaveBeenCalled();
-
-    const replacement = runtime.add(vi.fn());
-    const disposed = replacement.dispose();
-    history.emitBase();
-    await disposed;
-  });
-
-  it("reports a failed allow and closes its guard", async () => {
-    const decision = deferred();
-    const error = new Error("back failed");
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
-      return decision.promise;
-    });
-    history.emitBase();
-    currentSentinel().releaseFailure = error;
-
-    expect(allowBack?.()).toBe(false);
-    expect(history.reportError).toHaveBeenCalledWith(error);
-    expect(allowBack?.()).toBe(false);
-    await expect(guard.dispose()).rejects.toBe(error);
-    decision.resolve();
-  });
-
-  it("does not accept allow when release throws undefined", async () => {
-    const decision = deferred();
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
-      return decision.promise;
-    });
-    history.emitBase();
-    currentSentinel().releaseFailure = undefined;
-
-    expect(allowBack?.()).toBe(false);
-    expect(history.reportError).toHaveBeenCalledWith(undefined);
-    await expect(guard.dispose()).rejects.toBeUndefined();
-    decision.resolve();
-  });
-
-  it("re-arms after an unhandled callback rejection and reports it", async () => {
-    const error = new Error("dialog failed");
-    const onBack = vi
-      .fn<(allow: () => boolean) => void | PromiseLike<void>>()
+  it("propagates handler errors without removing the item", async () => {
+    const error = new Error("failed");
+    const handler = vi
+      .fn()
       .mockRejectedValueOnce(error)
       .mockImplementationOnce(() => undefined);
-    const guard = runtime.add(onBack);
+    runtime.add(handler);
 
-    history.emitBase();
-    await vi.waitFor(() =>
-      expect(history.reportError).toHaveBeenCalledWith(error),
-    );
-    history.emitBase();
-    expect(onBack).toHaveBeenCalledTimes(2);
-
-    const disposed = guard.dispose();
-    history.emitBase();
-    await disposed;
+    adapter.pop();
+    await expect(adapter.route()).rejects.toBe(error);
+    adapter.pop();
+    await expect(adapter.route()).resolves.toBe(false);
+    expect(handler).toHaveBeenCalledTimes(2);
   });
 
-  it("ends a generation without treating external replacement as an error", async () => {
-    const guard = runtime.add(vi.fn());
-    currentSentinel().atSentinel = false;
-
-    await expect(guard.dispose()).resolves.toBeUndefined();
-    expect(history.reportError).not.toHaveBeenCalled();
+  it("clears stale POP metadata after navigation settles", () => {
     runtime.add(vi.fn());
-    expect(history.sentinels).toHaveLength(2);
+    adapter.pop("/stale", "/current");
+    adapter.settle("/redirect", "/current");
+
+    expect(adapter.route("/stale", "/current")).toBeUndefined();
   });
 
-  it("ends ownership lost during allow without reporting it", async () => {
-    const decision = deferred();
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
-      return decision.promise;
-    });
-    history.emitBase();
-    currentSentinel().atSentinel = false;
+  it("reinstalls listeners after the stack becomes active again", () => {
+    const first = runtime.add(vi.fn());
+    first();
+    runtime.add(vi.fn());
 
-    expect(allowBack?.()).toBe(false);
-    expect(history.reportError).not.toHaveBeenCalled();
-    await expect(guard.dispose()).resolves.toBeUndefined();
-    decision.resolve();
-  });
-
-  it("rejects the generation when sentinel restoration fails", async () => {
-    const error = new Error("restore failed");
-    const guard = runtime.add(vi.fn());
-    currentSentinel().restoreFailure = error;
-
-    expect(history.emitBase()).toHaveBeenCalledOnce();
-    expect(history.reportError).toHaveBeenCalledWith(error);
-    await expect(guard.dispose()).rejects.toBe(error);
-  });
-
-  it("rejects queued guards when sentinel recreation fails", async () => {
-    const old = runtime.add(vi.fn());
-    const oldDisposed = old.dispose();
-    const error = new Error("create failed");
-    const replacement = runtime.add(vi.fn());
-    history.createFailure = error;
-
-    history.emitBase();
-    await oldDisposed;
-    expect(history.reportError).toHaveBeenCalledWith(error);
-    await expect(replacement.dispose()).rejects.toBe(error);
-  });
-
-  it("does not consume or report a change that misses the known base", async () => {
-    const guard = runtime.add(vi.fn());
-    const intercept = history.emit({ external: true });
-
-    expect(intercept).not.toHaveBeenCalled();
-    expect(history.reportError).not.toHaveBeenCalled();
-    await expect(guard.dispose()).resolves.toBeUndefined();
-  });
-
-  it("reports a final physical Back failure after closing the guard", async () => {
-    const decision = deferred();
-    const error = new Error("final back failed");
-    let allowBack: (() => boolean) | undefined;
-    const guard = runtime.add((current) => {
-      allowBack = current;
-      return decision.promise;
-    });
-    history.emitBase();
-    history.backFailure = error;
-
-    expect(allowBack?.()).toBe(true);
-    const disposed = guard.dispose();
-    history.emitBase();
-    await expect(disposed).rejects.toBe(error);
-    expect(history.reportError).toHaveBeenCalledWith(error);
-    decision.resolve();
+    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
+    expect(adapter.listenCleanup).toHaveBeenCalledOnce();
   });
 });

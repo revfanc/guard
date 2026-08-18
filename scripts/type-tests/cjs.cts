@@ -1,16 +1,27 @@
 import guard = require("@revfanc/guard");
+type Plugin = import(
+  "vue",
+  { with: { "resolution-mode": "import" } }
+).Plugin;
+type Router = import(
+  "vue-router",
+  { with: { "resolution-mode": "import" } }
+).Router;
 
-const onBack: guard.BackHandler = (allow) => {
-  const accepted: boolean = allow();
-  void accepted;
+declare const router: Router;
+const instance: guard.Guard = guard.createGuard(router);
+const plugin: Plugin = instance;
+const handler: guard.Handler = (allow) => {
+  const result: void = allow();
+  void result;
 };
-const instance: guard.BackGuard = guard.createBackGuard(onBack);
-const disposal: Promise<void> = instance.dispose();
-declare const allow: Parameters<guard.BackHandler>[0];
+const stop: () => void = guard.useGuard(handler);
+declare const allow: Parameters<guard.Handler>[0];
 
-// @ts-expect-error createBackGuard accepts a handler, not an options object.
-guard.createBackGuard({ onBack });
+// @ts-expect-error createGuard accepts a Router, not a Handler.
+guard.createGuard(handler);
 // @ts-expect-error allow accepts no arguments.
 allow(() => undefined);
 
-void disposal;
+void plugin;
+void stop;

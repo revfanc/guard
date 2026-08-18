@@ -1,8 +1,7 @@
-export interface BackGuard {
-  /** Stops guarding and waits until the owned history entry is released. */
-  dispose(): Promise<void>;
+export interface Guard {
+  install(
+    app: import("vue", { with: { "resolution-mode": "import" } }).App,
+  ): void;
 }
 
-export type BackHandler = (
-  allow: () => boolean,
-) => void | PromiseLike<void>;
+export type Handler = (allow: () => void) => void | PromiseLike<void>;

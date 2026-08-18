@@ -30,10 +30,13 @@ if (sideEffectBundle !== "") {
 
 const createBundle = await bundleEntry("scripts/tree-shaking/create.mjs");
 
-if (!createBundle.includes("createBackGuard")) {
+if (!createBundle.includes("@revfanc/guard.registry")) {
   throw new Error(
-    "Tree-shaking lost createBackGuard from the usage bundle.",
+    "Tree-shaking lost createGuard from the usage bundle.",
   );
+}
+if (createBundle.includes("Guard plugin is not installed")) {
+  throw new Error("Tree-shaking retained the unused useGuard branch.");
 }
 
 console.log("Tree-shaking verified (side-effect-free and create bundles).");

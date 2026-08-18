@@ -1,206 +1,86 @@
-import { JSDOM } from "jsdom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createApp, defineComponent, h } from "vue";
+import {
+  createMemoryHistory,
+  createRouter,
+  type Router,
+} from "vue-router";
+import { describe, expect, it, vi } from "vitest";
+import { createGuard, useGuard } from "../../src/index";
 
-const STATE_KEY = "__revfanc_guard__";
-
-let dom: JSDOM;
-
-function target(): Window {
-  return dom.window as unknown as Window;
-}
-
-function installStructuredCloneHistory(): void {
-  const history = dom.window.history;
-  const pushState = history.pushState.bind(history);
-  const replaceState = history.replaceState.bind(history);
-
-  vi.spyOn(history, "pushState").mockImplementation((data, unused, url) => {
-    pushState(structuredClone(data), unused, url);
-  });
-  vi.spyOn(history, "replaceState").mockImplementation((data, unused, url) => {
-    replaceState(structuredClone(data), unused, url);
+function router(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/", component: { render: () => null } }],
   });
 }
-
-beforeEach(() => {
-  dom = new JSDOM("<!doctype html><title>Guard API test</title>", {
-    url: "https://example.test/protected",
-  });
-  installStructuredCloneHistory();
-  vi.stubGlobal("window", dom.window);
-});
-
-afterEach(() => {
-  dom.window.close();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
 
 describe("public API", () => {
-  it("imports without side effects and installs one listener lazily", async () => {
-    const addEventListener = vi.spyOn(target(), "addEventListener");
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-
-    expect(addEventListener).not.toHaveBeenCalled();
-    const first = createBackGuard(vi.fn());
-    const second = createBackGuard(vi.fn());
-    const popstateCalls = addEventListener.mock.calls.filter(
-      ([eventName]) => eventName === "popstate",
+  it("validates the router at creation", () => {
+    expect(() => createGuard(undefined as never)).toThrow(
+      "router must be a Vue Router instance",
     );
-
-    expect(popstateCalls).toHaveLength(1);
-    expect(popstateCalls[0]?.[2]).toBe(true);
-    await second.dispose();
-    await first.dispose();
-  });
-
-  it("shares one window runtime across independently evaluated modules", async () => {
-    const addEventListener = vi.spyOn(target(), "addEventListener");
-    vi.resetModules();
-    const firstModule = await import("../../src/index");
-    const firstBack = vi.fn();
-    const first = firstModule.createBackGuard(firstBack);
-
-    vi.resetModules();
-    const secondModule = await import("../../src/index");
-    const secondBack = vi.fn();
-    const second = secondModule.createBackGuard(secondBack);
-
-    expect(
-      addEventListener.mock.calls.filter(([name]) => name === "popstate"),
-    ).toHaveLength(1);
-    target().history.back();
-    await vi.waitFor(() => expect(secondBack).toHaveBeenCalledOnce());
-    expect(firstBack).not.toHaveBeenCalled();
-
-    await expect(second.dispose()).resolves.toBeUndefined();
-    const disposal = first.dispose();
-    await expect(disposal).resolves.toBeUndefined();
-  });
-
-  it("is safe to import without a complete browser Window", async () => {
-    vi.stubGlobal("window", {});
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-
-    expect(() => createBackGuard(vi.fn())).toThrow(
-      "requires a browser with the History API",
+    expect(() => createGuard({ beforeEach: vi.fn() } as never)).toThrow(
+      "router must be a Vue Router instance",
     );
   });
 
-  it("validates the handler before changing history", async () => {
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    const initialLength = target().history.length;
+  it("validates the handler", () => {
+    const app = createApp({ render: () => null });
+    app.use(createGuard(router()));
 
-    expect(() => createBackGuard(null as never)).toThrow(
-      "onBack must be a function",
+    expect(() =>
+      app.runWithContext(() => useGuard(null as never)),
+    ).toThrow("handler must be a function");
+  });
+
+  it("requires the plugin in the current injection context", () => {
+    const error = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const app = createApp({ render: () => null });
+
+    expect(() => app.runWithContext(() => useGuard(vi.fn()))).toThrow(
+      "Guard plugin is not installed",
     );
-    expect(() => createBackGuard({ onBack: vi.fn() } as never)).toThrow(
-      "onBack must be a function",
+    error.mockRestore();
+  });
+
+  it("returns an idempotent stop function", () => {
+    const app = createApp({ render: () => null });
+    app.use(createGuard(router()));
+    const stop = app.runWithContext(() => useGuard(vi.fn()));
+
+    expect(stop).toBeTypeOf("function");
+    expect(() => {
+      stop();
+      stop();
+    }).not.toThrow();
+  });
+
+  it("stops automatically with the component scope", () => {
+    const current = router();
+    const stop = vi.fn();
+    const plugin = createGuard(current);
+    const original = current.options.history.listen.bind(
+      current.options.history,
     );
-    expect(target().history.length).toBe(initialLength);
-  });
-
-  it("continues the original Back after allow", async () => {
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    target().history.replaceState({ page: "origin" }, "", "/origin");
-    target().history.pushState({ page: "protected" }, "", "/protected");
-    let allowBack: (() => boolean) | undefined;
-    let finish!: () => void;
-    const pending = new Promise<void>((resolve) => {
-      finish = resolve;
+    vi.spyOn(current.options.history, "listen").mockImplementation((listener) => {
+      const cleanup = original(listener);
+      return () => {
+        stop();
+        cleanup();
+      };
     });
-    const guard = createBackGuard((current) => {
-      allowBack = current;
-      return pending;
+    const component = defineComponent({
+      setup() {
+        useGuard(vi.fn());
+        return () => h("div");
+      },
     });
+    const app = createApp(component);
+    app.use(plugin);
+    const root = document.createElement("div");
 
-    target().history.back();
-    await vi.waitFor(() => expect(allowBack).toBeDefined());
-    expect(allowBack?.()).toBe(true);
-    await vi.waitFor(() => {
-      expect(target().location.pathname).toBe("/origin");
-    });
-    await guard.dispose();
-    finish();
-  });
-
-  it("re-arms when a handler completes without allow", async () => {
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    target().history.replaceState({ page: "origin" }, "", "/origin");
-    target().history.pushState({ page: "protected" }, "", "/protected");
-    const onBack = vi.fn();
-    const guard = createBackGuard(onBack);
-
-    target().history.back();
-    await vi.waitFor(() => expect(onBack).toHaveBeenCalledOnce());
-    target().history.back();
-    await vi.waitFor(() => expect(onBack).toHaveBeenCalledTimes(2));
-    expect(target().location.pathname).toBe("/protected");
-
-    await guard.dispose();
-  });
-
-  it("reports handler errors through the target window", async () => {
-    const reportError = vi.fn();
-    Object.defineProperty(target(), "reportError", {
-      configurable: true,
-      value: reportError,
-    });
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    target().history.replaceState({ page: "origin" }, "", "/origin");
-    target().history.pushState({ page: "protected" }, "", "/protected");
-    const error = new Error("handler failed");
-    const guard = createBackGuard(() => {
-      throw error;
-    });
-
-    target().history.back();
-    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith(error));
-    await guard.dispose();
-  });
-
-  it("recreates during disposal without growing another history entry", async () => {
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    target().history.replaceState({ page: "origin" }, "", "/origin");
-    target().history.pushState({ page: "protected" }, "", "/protected");
-    const first = createBackGuard(vi.fn());
-    const guardedLength = target().history.length;
-    const replacementBack = vi.fn();
-
-    const disposed = first.dispose();
-    const replacement = createBackGuard(replacementBack);
-    await disposed;
-    await vi.waitFor(() => {
-      expect(target().history.state).toHaveProperty(STATE_KEY);
-    });
-    expect(target().history.length).toBe(guardedLength);
-
-    target().history.back();
-    await vi.waitFor(() => expect(replacementBack).toHaveBeenCalledOnce());
-    await replacement.dispose();
-  });
-
-  it("makes active navigation safe after awaited disposal", async () => {
-    vi.resetModules();
-    const { createBackGuard } = await import("../../src/index");
-    const guard = createBackGuard(vi.fn());
-
-    await guard.dispose();
-    expect(
-      target().history.state === null ||
-        !Object.prototype.hasOwnProperty.call(
-          target().history.state,
-          STATE_KEY,
-        ),
-    ).toBe(true);
-    target().history.pushState({ page: "next" }, "", "/next");
-    expect(target().location.pathname).toBe("/next");
+    app.mount(root);
+    app.unmount();
+    expect(stop).toHaveBeenCalledOnce();
   });
 });

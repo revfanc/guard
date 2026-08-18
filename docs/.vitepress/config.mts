@@ -4,7 +4,7 @@ const isProduction = process.env.NODE_ENV === "production";
 
 export default defineConfig({
   title: "Guard",
-  description: "A small, framework-agnostic browser back guard.",
+  description: "Vue Router POP navigation guard.",
   lang: "zh-CN",
   base: isProduction ? "/guard/" : "/",
   cleanUrls: true,
@@ -33,17 +33,14 @@ export default defineConfig({
         ],
       },
       {
-        text: "框架生命周期示例",
-        items: [
-          { text: "Vue", link: "/frameworks/vue-router" },
-          { text: "React", link: "/frameworks/react-router" },
-        ],
+        text: "框架",
+        items: [{ text: "Vue Router", link: "/frameworks/vue-router" }],
       },
       {
         text: "参考",
         items: [
           { text: "API", link: "/api" },
-          { text: "浏览器限制", link: "/guide/limitations" },
+          { text: "边界与限制", link: "/guide/limitations" },
         ],
       },
     ],
