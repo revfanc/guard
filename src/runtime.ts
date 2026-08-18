@@ -1,155 +1,338 @@
-import type { Adapter, Pop } from "./router";
-import type { Handler } from "./types";
+import { createHistory, type History, type Sentinel } from "./history";
+import type { Guard, Handler } from "./types";
+
+const RUNTIME = Symbol.for("@revfanc/guard.runtime.v1");
 
 type Item = {
   active: boolean;
+  close(): void;
+  closed: Promise<void>;
   handler: Handler;
 };
 
 type Attempt = {
+  allow(): void;
   item: Item;
-  tail: Promise<void>;
-  stop(): void;
 };
 
-type Outcome =
-  | { type: "done" }
-  | { type: "error"; error: unknown }
-  | { type: "stop" };
+type Active = {
+  items: Item[];
+  phase: "active";
+  sentinel: Sentinel;
+};
 
-export class Runtime {
-  private readonly items: Item[] = [];
-  private readonly pops: Pop[] = [];
+type Cleaning = {
+  action: "leave" | "stay";
+  closing: Item;
+  phase: "cleaning";
+  restart: Item[];
+  sentinel: Sentinel;
+};
+
+type State = Active | Cleaning | undefined;
+type Reporter = (error: unknown) => void;
+type Shared = {
+  protocol: 1;
+  add(handler: Handler): Guard;
+};
+type RuntimeWindow = Window & { [key: symbol]: unknown };
+
+const fallback = new WeakMap<Window, Shared>();
+
+function item(handler: Handler): Item {
+  let close!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    close = resolve;
+  });
+  return { active: true, close, closed, handler };
+}
+
+function shared(value: unknown): value is Shared {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<Shared>;
+  return candidate.protocol === 1 && typeof candidate.add === "function";
+}
+
+function reporter(target: Window): Reporter {
+  return (error) => {
+    if (typeof target.reportError === "function") {
+      target.reportError.call(target, error);
+    } else {
+      target.setTimeout(() => {
+        throw error;
+      }, 0);
+    }
+  };
+}
+
+export class Runtime implements Shared {
+  readonly protocol = 1 as const;
   private attempt?: Attempt;
-  private cleanups?: Array<() => void>;
+  private state: State;
 
-  constructor(private readonly router: Adapter) {}
+  constructor(
+    private readonly history: History,
+    private readonly report: Reporter,
+  ) {
+    history.listen((intercept) => this.change(intercept));
+  }
 
-  add(handler: Handler): () => void {
-    const item: Item = { active: true, handler };
-    this.items.push(item);
-    this.attach();
+  add(handler: Handler): Guard {
+    const current = item(handler);
+    const state = this.state;
+    if (!state) {
+      this.activate([current]);
+    } else if (state.phase === "cleaning") {
+      state.restart.push(current);
+    } else {
+      let owned = false;
+      try {
+        owned = state.sentinel.active();
+      } catch {
+        // Re-coordinate below.
+      }
+      if (owned) {
+        state.items.push(current);
+      } else {
+        const items = [...state.items, current];
+        this.attempt = undefined;
+        this.state = undefined;
+        this.activate(items);
+      }
+    }
 
     let stopped = false;
-    return () => {
-      if (stopped) return;
-      stopped = true;
-      this.remove(item);
+    const stop: Guard = () => {
+      if (!stopped) {
+        stopped = true;
+        this.stop(current);
+      }
+      return current.closed;
     };
+    return stop;
   }
 
-  private attach(): void {
-    if (this.cleanups) return;
-    this.cleanups = [
-      this.router.listen((pop) => this.pops.push(pop)),
-      this.router.before((to, from) => this.before(to, from)),
-      this.router.after(() => {
-        this.pops.length = 0;
-      }),
-    ];
-  }
-
-  private detach(): void {
-    if (this.items.length > 0 || this.attempt || !this.cleanups) return;
-    for (const cleanup of this.cleanups) cleanup();
-    this.cleanups = undefined;
-    this.pops.length = 0;
-  }
-
-  private take(to: string, from: string): Pop | undefined {
-    let index = this.pops.findIndex(
-      (pop) => pop.to === to && pop.from === from,
-    );
-    if (index < 0 && this.attempt) {
-      index = this.pops.findIndex((pop) => pop.to === to);
+  private activate(items: Item[]): void {
+    const active = items.filter((current) => current.active);
+    if (active.length === 0) return;
+    try {
+      this.state = {
+        items: active,
+        phase: "active",
+        sentinel: this.history.create(),
+      };
+    } catch {
+      this.state = undefined;
+      for (const current of active) this.finish(current);
     }
-    if (index < 0) return undefined;
-    const [pop] = this.pops.splice(index, 1);
-    return pop;
   }
 
-  private before(to: string, from: string): Promise<boolean> | undefined {
-    const pop = this.take(to, from);
-    if (!pop) return undefined;
-    if (this.attempt) return this.reject(this.attempt);
-
-    const item = this.items[this.items.length - 1];
-    if (!item) {
-      this.detach();
-      return undefined;
+  private change(intercept: () => void): void {
+    try {
+      if (this.history.inactive()) {
+        intercept();
+        this.history.back();
+        return;
+      }
+    } catch {
+      return;
     }
-    return this.decide(item);
+
+    const state = this.state;
+    if (!state) return;
+    let base = false;
+    try {
+      base = state.sentinel.base();
+    } catch {
+      // Unknown traversal is allowed below.
+    }
+    if (!base) {
+      const items = state.phase === "active" ? state.items : state.restart;
+      if (state.phase === "cleaning") this.finish(state.closing);
+      this.attempt = undefined;
+      this.state = undefined;
+      this.history.defer(() => this.activate(items));
+      return;
+    }
+
+    if (state.phase === "active") {
+      try {
+        state.sentinel.restore();
+      } catch {
+        this.state = undefined;
+        this.attempt = undefined;
+        this.history.defer(() => this.activate(state.items));
+        return;
+      }
+      intercept();
+      if (!this.attempt) {
+        const top = state.items[state.items.length - 1];
+        if (top) this.dispatch(top);
+      }
+      return;
+    }
+
+    intercept();
+    try {
+      state.sentinel.settle();
+    } catch {
+      // The traversal already reached a clean entry. Continue fail-open.
+    }
+    this.state = undefined;
+    this.finish(state.closing);
+    const restart = state.restart.filter((current) => current.active);
+    if (restart.length > 0) {
+      this.activate(restart);
+    } else if (state.action === "leave") {
+      try {
+        this.history.back();
+      } catch {
+        // The protected traversal has already been released.
+      }
+    }
   }
 
-  private async decide(item: Item): Promise<boolean> {
-    let allowed = false;
-    let stop!: () => void;
-    let settle!: (value: { place: string; rollback: boolean }) => void;
-    const stopped = new Promise<Outcome>((resolve) => {
-      stop = () => resolve({ type: "stop" });
-    });
-    const settled = new Promise<{ place: string; rollback: boolean }>(
-      (resolve) => {
-        settle = resolve;
+  private dispatch(current: Item): void {
+    let valid = true;
+    const attempt: Attempt = {
+      allow: () => {
+        if (!valid) return;
+        valid = false;
+        this.allow(attempt);
       },
-    );
-    const tail = settled.then(async ({ place, rollback }) => {
-      if (rollback) await this.router.wait(place);
-    });
-    const attempt: Attempt = { item, stop, tail };
+      item: current,
+    };
     this.attempt = attempt;
+    const finish = (): void => {
+      valid = false;
+      if (this.attempt === attempt) this.attempt = undefined;
+    };
+    const fail = (error: unknown): void => {
+      finish();
+      this.report(error);
+    };
 
-    const handler = Promise.resolve().then(() =>
-      item.handler(() => {
-        if (item.active && this.attempt === attempt) allowed = true;
-      }),
-    );
-    const completion = handler.then<Outcome, Outcome>(
-      () => ({ type: "done" }),
-      (error: unknown) => ({ type: "error", error }),
-    );
-    const outcome = await Promise.race([completion, stopped]);
-
-    if (this.attempt === attempt) this.attempt = undefined;
-
-    if (outcome.type === "error") {
-      settle({ place: this.router.place(), rollback: true });
-      this.detach();
-      throw outcome.error;
+    try {
+      const result = current.handler(attempt.allow);
+      if (result && typeof result.then === "function") {
+        Promise.resolve(result).then(finish, fail);
+      } else {
+        finish();
+      }
+    } catch (error) {
+      fail(error);
     }
-    if (outcome.type === "stop" || !item.active) {
-      settle({ place: this.router.place(), rollback: true });
-      this.detach();
-      return false;
-    }
-    if (!allowed) {
-      settle({ place: this.router.place(), rollback: true });
-      this.detach();
-      return false;
-    }
-
-    this.remove(item);
-    const result = this.items.length === 0;
-    settle({ place: this.router.place(), rollback: !result });
-    return result;
   }
 
-  private reject(attempt: Attempt): Promise<boolean> {
-    let place = "";
-    const result = attempt.tail.then(() => {
-      place = this.router.place();
-      return false;
-    });
-    attempt.tail = result.then(() => this.router.wait(place));
-    return result;
+  private allow(attempt: Attempt): void {
+    const state = this.state;
+    const current = attempt.item;
+    if (
+      this.attempt !== attempt ||
+      !current.active ||
+      !state ||
+      state.phase !== "active"
+    ) {
+      return;
+    }
+    this.attempt = undefined;
+    const index = state.items.indexOf(current);
+    if (index < 0) return;
+    state.items.splice(index, 1);
+    if (state.items.length > 0) {
+      this.finish(current);
+      return;
+    }
+    this.clean(state, current, "leave");
   }
 
-  private remove(item: Item): void {
-    if (!item.active) return;
-    item.active = false;
-    const index = this.items.indexOf(item);
-    if (index >= 0) this.items.splice(index, 1);
-    if (this.attempt?.item === item) this.attempt.stop();
-    this.detach();
+  private stop(current: Item): void {
+    if (!current.active) return;
+    const state = this.state;
+    if (!state) {
+      this.finish(current);
+      return;
+    }
+    if (state.phase === "cleaning") {
+      if (state.closing === current) return;
+      const index = state.restart.indexOf(current);
+      if (index >= 0) state.restart.splice(index, 1);
+      this.finish(current);
+      return;
+    }
+
+    const index = state.items.indexOf(current);
+    if (index < 0) {
+      this.finish(current);
+      return;
+    }
+    state.items.splice(index, 1);
+    if (this.attempt?.item === current) this.attempt = undefined;
+    if (state.items.length > 0) {
+      this.finish(current);
+      return;
+    }
+    this.clean(state, current, "stay");
   }
+
+  private clean(
+    state: Active,
+    closing: Item,
+    action: Cleaning["action"],
+  ): void {
+    this.attempt = undefined;
+    const cleaning: Cleaning = {
+      action,
+      closing,
+      phase: "cleaning",
+      restart: [],
+      sentinel: state.sentinel,
+    };
+    this.state = cleaning;
+    try {
+      state.sentinel.release();
+    } catch {
+      this.state = undefined;
+      this.finish(closing);
+      this.history.defer(() => this.activate(cleaning.restart));
+    }
+  }
+
+  private finish(current: Item): void {
+    if (!current.active) return;
+    current.active = false;
+    current.close();
+  }
+}
+
+export function add(target: Window, handler: Handler): Guard {
+  const root = target as RuntimeWindow;
+  let created: Shared | undefined;
+  try {
+    const existing = root[RUNTIME];
+    if (shared(existing)) return existing.add(handler);
+    if (existing === undefined) {
+      created = new Runtime(createHistory(target), reporter(target));
+      Object.defineProperty(root, RUNTIME, {
+        configurable: false,
+        enumerable: false,
+        value: created,
+        writable: false,
+      });
+      return created.add(handler);
+    }
+  } catch {
+    // Fall through to the module-local registry.
+  }
+
+  let runtime = fallback.get(target) ?? created;
+  if (!runtime) {
+    try {
+      runtime = new Runtime(createHistory(target), reporter(target));
+    } catch {
+      return () => Promise.resolve();
+    }
+  }
+  fallback.set(target, runtime);
+  return runtime.add(handler);
 }

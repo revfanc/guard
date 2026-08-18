@@ -1,24 +1,23 @@
 # 生命周期
 
-首层 `useGuard()` 注册时，Runtime 才会连接 Router 的 history listener、`beforeEach` 和 `afterEach`。最后一层停止或被消费，并且没有 pending 决策后，三类监听会被移除。
+第一次 `createGuard()` 调用会：
 
-一次 POP 的处理顺序如下：
+1. 为当前 Window 创建共享 Runtime；
+2. 注册一个捕获阶段的 `popstate` listener；
+3. 在当前 URL 上增加一条 active 缓冲；
+4. 把 Handler 压入 LIFO 栈。
 
-1. history listener 记录 `type === "pop"` 且 `delta !== 0` 的导航。
-2. `beforeEach` 用目标和来源匹配这次 POP。
-3. 只调用当前栈顶 Handler。
-4. Handler 调用 `allow()` 且没有下层时放行，否则由 Vue Router 恢复原位置。
-5. `afterEach` 清除未匹配的临时 POP 信息。
+单步 Back 的处理顺序：
 
-Handler pending 时，后续 POP 会按顺序拒绝，并等待 Vue Router 完成位置恢复，不会再次调用同一个 Handler。
+1. 浏览器从 active 缓冲穿越到 base；
+2. Runtime 立即重新 push active 缓冲；
+3. 阻止本次 `popstate` 继续传播；
+4. 只调用栈顶 Handler；
+5. 未调用 `allow()` 时保留当前层；
+6. 调用 `allow()` 时消费当前层；最后一层会释放缓冲并继续 Back。
 
-停止当前活跃层会立即使它持有的 `allow` 失效，并拒绝当前 POP。停止其他层只会移除对应注册。
+Handler pending 时，后续顺序 Back 仍会先恢复缓冲，但不会重复派发 Handler。同一任务中已经排队的多次穿越无法完全保证。
 
-```ts
-const stop = useGuard(async (allow) => {
-  if (await decide()) allow()
-})
+最后一层主动停止时，active 缓冲会变为 inactive，再无监听地回到 base。停止 Promise 在 base 恢复后完成。
 
-stop()
-stop() // 幂等
-```
+Runtime 在首次使用后保留到 Window 生命周期结束，用于识别并拒绝进入 inactive 缓冲的 Forward。

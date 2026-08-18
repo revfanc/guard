@@ -1,64 +1,70 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Adapter, Before, Pop } from "../../src/router";
+import type { History, Sentinel } from "../../src/history";
 import { Runtime } from "../../src/runtime";
 
-class Fake implements Adapter {
-  readonly afterCleanup = vi.fn();
-  readonly beforeCleanup = vi.fn();
-  readonly listenCleanup = vi.fn();
-  private afterHandler?: (to: string, from: string) => void;
-  private beforeHandler?: Before;
-  private popHandler?: (pop: Pop) => void;
-  private value = "/current";
+type Place = "active" | "base" | "inactive" | "other";
 
-  after(listener: (to: string, from: string) => void): () => void {
-    this.afterHandler = listener;
-    return this.afterCleanup;
+class Fake implements History, Sentinel {
+  readonly back = vi.fn();
+  readonly create = vi.fn(() => {
+    if (this.createError) throw this.createError;
+    this.place = "active";
+    return this;
+  });
+  readonly release = vi.fn(() => {
+    if (this.releaseError) throw this.releaseError;
+    this.place = "inactive";
+    this.back();
+  });
+  readonly restore = vi.fn(() => {
+    if (this.restoreError) throw this.restoreError;
+    this.place = "active";
+  });
+  readonly settle = vi.fn(() => {
+    if (this.settleError) throw this.settleError;
+    this.place = "base";
+  });
+  createError?: Error;
+  releaseError?: Error;
+  restoreError?: Error;
+  settleError?: Error;
+  private deferred: Array<() => void> = [];
+  private listener?: (intercept: () => void) => void;
+  private place: Place = "other";
+
+  active(): boolean {
+    return this.place === "active";
   }
 
-  before(listener: Before): () => void {
-    this.beforeHandler = listener;
-    return this.beforeCleanup;
+  base(): boolean {
+    return this.place === "base";
   }
 
-  listen(listener: (pop: Pop) => void): () => void {
-    this.popHandler = listener;
-    return this.listenCleanup;
+  defer(listener: () => void): void {
+    this.deferred.push(listener);
   }
 
-  pop(to = "/before", from = "/current", delta = -1): void {
-    this.value = to;
-    this.popHandler?.({ delta, from, to });
+  flush(): void {
+    for (const listener of this.deferred.splice(0)) listener();
   }
 
-  place(): string {
-    return this.value;
+  inactive(): boolean {
+    return this.place === "inactive";
   }
 
-  async wait(place: string): Promise<void> {
-    await vi.waitFor(() => expect(this.value).not.toBe(place));
+  listen(listener: (intercept: () => void) => void): void {
+    this.listener = listener;
   }
 
-  restore(to: string): void {
-    this.value = to;
-  }
-
-  route(
-    to = "/before",
-    from = "/current",
-  ): boolean | void | PromiseLike<boolean | void> {
-    return this.beforeHandler?.(to, from);
-  }
-
-  settle(to = "/before", from = "/current"): void {
-    this.afterHandler?.(to, from);
+  pop(place: Exclude<Place, "active">): ReturnType<typeof vi.fn> {
+    this.place = place;
+    const intercept = vi.fn();
+    this.listener?.(intercept);
+    return intercept;
   }
 }
 
-function deferred(): {
-  promise: Promise<void>;
-  resolve(): void;
-} {
+function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
   const promise = new Promise<void>((current) => {
     resolve = current;
@@ -66,143 +72,244 @@ function deferred(): {
   return { promise, resolve };
 }
 
-let adapter: Fake;
+let history: Fake;
+let report: ReturnType<typeof vi.fn<(error: unknown) => void>>;
 let runtime: Runtime;
 
 beforeEach(() => {
-  adapter = new Fake();
-  runtime = new Runtime(adapter);
+  history = new Fake();
+  report = vi.fn<(error: unknown) => void>();
+  runtime = new Runtime(history, report);
 });
 
 describe("Runtime", () => {
-  it("ignores navigation without matching POP metadata", () => {
-    const handler = vi.fn();
-    runtime.add(handler);
+  it("creates one buffer and shares it across registrations", () => {
+    runtime.add(vi.fn());
+    runtime.add(vi.fn());
 
-    expect(adapter.route("/push", "/current")).toBeUndefined();
-    expect(handler).not.toHaveBeenCalled();
+    expect(history.create).toHaveBeenCalledOnce();
   });
 
-  it("keeps the top item when its handler does not allow", async () => {
-    const handler = vi.fn();
-    runtime.add(handler);
-
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(false);
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(false);
-    expect(handler).toHaveBeenCalledTimes(2);
-  });
-
-  it("allows the POP after consuming the final item", async () => {
-    const handler = vi.fn((allow: () => void) => allow());
-    runtime.add(handler);
-
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(true);
-    adapter.pop();
-    expect(adapter.route()).toBeUndefined();
-    expect(handler).toHaveBeenCalledOnce();
-  });
-
-  it("consumes one LIFO layer per POP", async () => {
+  it("dispatches and consumes items in LIFO order", async () => {
     const calls: string[] = [];
-    runtime.add((allow) => {
+    const outer = runtime.add((allow) => {
       calls.push("outer");
       allow();
     });
-    runtime.add((allow) => {
+    const inner = runtime.add((allow) => {
       calls.push("inner");
       allow();
     });
 
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(false);
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(true);
+    expect(history.pop("base")).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["inner"]);
+    expect(history.restore).toHaveBeenCalledOnce();
+    await inner();
+
+    history.pop("base");
     expect(calls).toEqual(["inner", "outer"]);
+    expect(history.release).toHaveBeenCalledOnce();
+    expect(history.back).toHaveBeenCalledOnce();
+
+    history.pop("base");
+    await outer();
+    expect(history.settle).toHaveBeenCalledOnce();
+    expect(history.back).toHaveBeenCalledTimes(2);
   });
 
-  it("does not dispatch another handler while one is pending", async () => {
+  it("retains a layer when its Handler does not allow", () => {
+    const handler = vi.fn();
+    runtime.add(handler);
+
+    history.pop("base");
+    history.pop("base");
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(history.restore).toHaveBeenCalledTimes(2);
+    expect(history.release).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke another Handler while one is pending", async () => {
     const decision = deferred();
     const handler = vi.fn(() => decision.promise);
     runtime.add(handler);
 
-    adapter.pop("/first");
-    const first = adapter.route("/first");
-    adapter.pop("/second", "/first");
-    const second = adapter.route("/second", "/current");
-    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    history.pop("base");
+    history.pop("base");
 
+    expect(handler).toHaveBeenCalledOnce();
+    expect(history.restore).toHaveBeenCalledTimes(2);
     decision.resolve();
-    await expect(first).resolves.toBe(false);
-    adapter.restore("/first");
-    await expect(second).resolves.toBe(false);
+    await decision.promise;
   });
 
-  it("stopping the active item invalidates allow and rejects the POP", async () => {
+  it("invalidates allow when the Attempt completes", () => {
+    let stale: (() => void) | undefined;
+    const handler = vi.fn((allow: () => void) => {
+      stale = allow;
+    });
+    runtime.add(handler);
+
+    history.pop("base");
+    stale?.();
+    history.pop("base");
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(history.release).not.toHaveBeenCalled();
+  });
+
+  it("keeps a new registration made during a pending Attempt", () => {
+    const decision = deferred();
+    let allow: (() => void) | undefined;
+    const outer = runtime.add((current) => {
+      allow = current;
+      return decision.promise;
+    });
+    history.pop("base");
+    const innerHandler = vi.fn();
+    runtime.add(innerHandler);
+
+    allow?.();
+    expect(history.release).not.toHaveBeenCalled();
+    history.pop("base");
+
+    expect(innerHandler).toHaveBeenCalledOnce();
+    void outer();
+    decision.resolve();
+  });
+
+  it("reports Handler errors and keeps the layer", async () => {
+    const failure = new Error("decision failed");
+    const handler = vi
+      .fn()
+      .mockRejectedValueOnce(failure)
+      .mockImplementationOnce(() => undefined);
+    runtime.add(handler);
+
+    history.pop("base");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(report).toHaveBeenCalledWith(failure);
+
+    history.pop("base");
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns one Promise and restores base when the last item stops", async () => {
+    const stop = runtime.add(vi.fn());
+
+    const first = stop();
+    expect(stop()).toBe(first);
+    expect(history.release).toHaveBeenCalledOnce();
+    let settled = false;
+    void first.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    history.pop("base");
+    await expect(first).resolves.toBeUndefined();
+    expect(history.back).toHaveBeenCalledOnce();
+  });
+
+  it("stops a non-final item without releasing the buffer", async () => {
+    const outer = runtime.add(vi.fn());
+    runtime.add(vi.fn());
+
+    await outer();
+
+    expect(history.release).not.toHaveBeenCalled();
+  });
+
+  it("stopping the active Attempt makes its allow ineffective", async () => {
     const decision = deferred();
     let allow: (() => void) | undefined;
     const stop = runtime.add((current) => {
       allow = current;
       return decision.promise;
     });
+    history.pop("base");
 
-    adapter.pop();
-    const navigation = adapter.route();
-    await vi.waitFor(() => expect(allow).toBeTypeOf("function"));
-    stop();
+    const cleanup = stop();
     allow?.();
-
-    await expect(navigation).resolves.toBe(false);
+    expect(history.release).toHaveBeenCalledOnce();
+    history.pop("base");
+    await cleanup;
+    expect(history.back).toHaveBeenCalledOnce();
     decision.resolve();
-    expect(adapter.afterCleanup).toHaveBeenCalledOnce();
-    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
-    expect(adapter.listenCleanup).toHaveBeenCalledOnce();
   });
 
-  it("returns an idempotent stop function for any layer", async () => {
-    const outer = runtime.add(vi.fn());
-    const inner = runtime.add((allow) => allow());
+  it("restarts registrations created during cleanup", async () => {
+    const first = runtime.add(vi.fn());
+    const cleanup = first();
+    const second = runtime.add(vi.fn());
 
-    outer();
-    outer();
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(true);
-    inner();
+    history.pop("base");
+    await cleanup;
+    expect(history.create).toHaveBeenCalledTimes(2);
 
-    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
+    void second();
   });
 
-  it("propagates handler errors without removing the item", async () => {
-    const error = new Error("failed");
-    const handler = vi
-      .fn()
-      .mockRejectedValueOnce(error)
-      .mockImplementationOnce(() => undefined);
+  it("rejects entry into an inactive buffer without a Guard stack", () => {
+    const stop = runtime.add(vi.fn());
+    void stop();
+    history.pop("base");
+    history.back.mockClear();
+
+    const intercept = history.pop("inactive");
+
+    expect(intercept).toHaveBeenCalledOnce();
+    expect(history.back).toHaveBeenCalledOnce();
+  });
+
+  it("fails open and re-arms after an unknown POP", () => {
+    const handler = vi.fn();
+    runtime.add(handler);
+    const intercept = history.pop("other");
+
+    expect(intercept).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    history.flush();
+    expect(history.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("finishes cleanup and only re-arms new items after an unknown POP", async () => {
+    const first = runtime.add(vi.fn());
+    const cleanup = first();
+    const next = vi.fn();
+    runtime.add(next);
+
+    const intercept = history.pop("other");
+
+    expect(intercept).not.toHaveBeenCalled();
+    await expect(cleanup).resolves.toBeUndefined();
+    history.flush();
+    expect(history.create).toHaveBeenCalledTimes(2);
+
+    history.pop("base");
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("does not intercept when restoring the buffer fails", () => {
+    const handler = vi.fn();
+    history.restoreError = new Error("push failed");
     runtime.add(handler);
 
-    adapter.pop();
-    await expect(adapter.route()).rejects.toBe(error);
-    adapter.pop();
-    await expect(adapter.route()).resolves.toBe(false);
-    expect(handler).toHaveBeenCalledTimes(2);
+    const intercept = history.pop("base");
+
+    expect(intercept).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    history.flush();
+    expect(history.create).toHaveBeenCalledTimes(2);
   });
 
-  it("clears stale POP metadata after navigation settles", () => {
-    runtime.add(vi.fn());
-    adapter.pop("/stale", "/current");
-    adapter.settle("/redirect", "/current");
+  it("does not throw when History coordination fails", async () => {
+    history.createError = new Error("push failed");
+    const stop = runtime.add(vi.fn());
 
-    expect(adapter.route("/stale", "/current")).toBeUndefined();
-  });
-
-  it("reinstalls listeners after the stack becomes active again", () => {
-    const first = runtime.add(vi.fn());
-    first();
-    runtime.add(vi.fn());
-
-    expect(adapter.beforeCleanup).toHaveBeenCalledOnce();
-    expect(adapter.listenCleanup).toHaveBeenCalledOnce();
+    await expect(stop()).resolves.toBeUndefined();
+    expect(report).not.toHaveBeenCalled();
   });
 });

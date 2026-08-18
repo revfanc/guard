@@ -1,86 +1,106 @@
-import { createApp, defineComponent, h } from "vue";
-import {
-  createMemoryHistory,
-  createRouter,
-  type Router,
-} from "vue-router";
-import { describe, expect, it, vi } from "vitest";
-import { createGuard, useGuard } from "../../src/index";
+import { JSDOM } from "jsdom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createGuard } from "../../src/index";
 
-function router(): Router {
-  return createRouter({
-    history: createMemoryHistory(),
-    routes: [{ path: "/", component: { render: () => null } }],
+const windows: JSDOM[] = [];
+
+function target(url = "https://example.test/protected"): Window {
+  const dom = new JSDOM("<!doctype html><title>Guard</title>", { url });
+  windows.push(dom);
+  const history = dom.window.history;
+  const push = history.pushState.bind(history);
+  const replace = history.replaceState.bind(history);
+  vi.spyOn(history, "pushState").mockImplementation((data, unused, next) => {
+    push(structuredClone(data), unused, next);
   });
+  vi.spyOn(history, "replaceState").mockImplementation(
+    (data, unused, next) => {
+      replace(structuredClone(data), unused, next);
+    },
+  );
+  return dom.window as unknown as Window;
 }
 
+afterEach(() => {
+  for (const dom of windows.splice(0)) dom.window.close();
+});
+
 describe("public API", () => {
-  it("validates the router at creation", () => {
-    expect(() => createGuard(undefined as never)).toThrow(
-      "router must be a Vue Router instance",
-    );
-    expect(() => createGuard({ beforeEach: vi.fn() } as never)).toThrow(
-      "router must be a Vue Router instance",
+  it("validates the Handler", () => {
+    expect(() => createGuard(null as never, target())).toThrow(
+      "handler must be a function",
     );
   });
 
-  it("validates the handler", () => {
-    const app = createApp({ render: () => null });
-    app.use(createGuard(router()));
-
-    expect(() =>
-      app.runWithContext(() => useGuard(null as never)),
-    ).toThrow("handler must be a function");
-  });
-
-  it("requires the plugin in the current injection context", () => {
-    const error = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const app = createApp({ render: () => null });
-
-    expect(() => app.runWithContext(() => useGuard(vi.fn()))).toThrow(
-      "Guard plugin is not installed",
+  it("validates the target Window", () => {
+    expect(() => createGuard(vi.fn(), {} as Window)).toThrow(
+      "target must be a same-origin Window with the History API",
     );
-    error.mockRestore();
   });
 
-  it("returns an idempotent stop function", () => {
-    const app = createApp({ render: () => null });
-    app.use(createGuard(router()));
-    const stop = app.runWithContext(() => useGuard(vi.fn()));
-
-    expect(stop).toBeTypeOf("function");
-    expect(() => {
-      stop();
-      stop();
-    }).not.toThrow();
+  it("requires a browser when target is omitted", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "window");
+    try {
+      expect(() => createGuard(vi.fn())).toThrow(
+        "target must be a same-origin Window with the History API",
+      );
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+    }
   });
 
-  it("stops automatically with the component scope", () => {
-    const current = router();
-    const stop = vi.fn();
-    const plugin = createGuard(current);
-    const original = current.options.history.listen.bind(
-      current.options.history,
+  it("returns one idempotent asynchronous stop function", async () => {
+    const stop = createGuard(vi.fn(), target());
+    const first = stop();
+
+    expect(stop()).toBe(first);
+    await expect(first).resolves.toBeUndefined();
+  });
+
+  it("isolates Runtime state by Window", () => {
+    const parent = target("https://example.test/parent");
+    const frame = target("https://example.test/frame");
+    const parentPush = vi.spyOn(parent.history, "pushState");
+    const framePush = vi.spyOn(frame.history, "pushState");
+
+    createGuard(vi.fn(), parent);
+    createGuard(vi.fn(), parent);
+    createGuard(vi.fn(), frame);
+
+    expect(parentPush).toHaveBeenCalledOnce();
+    expect(framePush).toHaveBeenCalledOnce();
+  });
+
+  it("shares one Runtime across compatible module calls", () => {
+    const current = target();
+    const push = vi.spyOn(current.history, "pushState");
+
+    createGuard(vi.fn(), current);
+    createGuard(vi.fn(), current);
+
+    expect(push).toHaveBeenCalledOnce();
+    const symbols = Object.getOwnPropertySymbols(current).filter((symbol) =>
+      String(symbol).includes("@revfanc/guard.runtime.v1"),
     );
-    vi.spyOn(current.options.history, "listen").mockImplementation((listener) => {
-      const cleanup = original(listener);
-      return () => {
-        stop();
-        cleanup();
-      };
-    });
-    const component = defineComponent({
-      setup() {
-        useGuard(vi.fn());
-        return () => h("div");
+    expect(symbols).toHaveLength(1);
+  });
+
+  it("uses an isolated fallback when the global Runtime slot is occupied", () => {
+    const current = target();
+    const push = vi.mocked(current.history.pushState);
+    Object.defineProperty(
+      current,
+      Symbol.for("@revfanc/guard.runtime.v1"),
+      {
+        configurable: false,
+        value: { occupied: true },
       },
-    });
-    const app = createApp(component);
-    app.use(plugin);
-    const root = document.createElement("div");
+    );
 
-    app.mount(root);
-    app.unmount();
-    expect(stop).toHaveBeenCalledOnce();
+    createGuard(vi.fn(), current);
+    createGuard(vi.fn(), current);
+
+    expect(push).toHaveBeenCalledOnce();
   });
 });

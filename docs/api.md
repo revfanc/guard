@@ -1,39 +1,48 @@
 # API
 
-公开运行时只导出 `createGuard` 和 `useGuard`，公开类型只导出 `Guard` 和 `Handler`。
+运行时只导出 `createGuard`，公开类型只有 `Guard` 和 `Handler`。
 
-## `createGuard(router)`
-
-```ts
-function createGuard(router: Router): Guard
-```
-
-为一个 Vue Router 实例取得共享 Runtime，并返回 Vue 插件。使用同一个 Router 创建多个插件时会共享 Runtime；不同 Router 相互隔离。插件不会修改 Router 对象。
-
-参数不是有效 Vue Router 实例时同步抛出配置错误。
-
-## `useGuard(handler)`
+## `createGuard(handler, target?)`
 
 ```ts
-function useGuard(handler: Handler): () => void
+function createGuard(
+  handler: Handler,
+  target?: Window,
+): Guard
 ```
 
-在当前插件注入上下文注册一层 Guard，并返回幂等停止函数。若存在当前 Vue 作用域，会通过 `onScopeDispose()` 自动停止。
+立即在目标 Window 的 Runtime 栈顶注册一层 Guard。省略 `target` 时使用当前浏览器 `window`。
+
+传入同源 iframe 的 `contentWindow`，可以显式保护该 iframe：
+
+```ts
+const stop = createGuard(handler, iframe.contentWindow!)
+```
 
 以下情况同步抛出配置错误：
 
 - `handler` 不是函数；
-- 当前 Vue 注入上下文没有安装 Guard 插件。
+- 没有可用的浏览器 Window；
+- `target` 不是同源且可访问的 Window，或不具备 History API。
+
+History 状态冲突、History 写入失败和未知穿越不会抛出库内部异常，而是 fail-open。
 
 ## `Guard`
 
 ```ts
 interface Guard {
-  install(app: App): void
+  (): Promise<void>
 }
 ```
 
-`Guard` 是可传给 `app.use()` 的 Vue 对象插件。
+Guard 是幂等的异步停止函数。重复调用返回同一个 Promise。最后一层停止时，Promise 会在同 URL 缓冲恢复到 base 后完成。
+
+主动执行路由跳转、`pushState`、`replaceState` 或文档导航前，应先等待停止：
+
+```ts
+await stop()
+router.push("/next")
+```
 
 ## `Handler`
 
@@ -45,10 +54,8 @@ type Handler = (
 
 Handler 完成前调用 `allow()` 表示消费当前层：
 
-- 仍有下层时，当前 POP 被拒绝，下一次 POP 再处理下一层；
-- 已是最后一层时，原 POP 完成；
-- 完成但没有调用 `allow()` 时，当前 POP 被拒绝且本层保留。
+- 还有其他层：留在当前页面，下一次 Back 再处理新的栈顶；
+- 已是最后一层：释放缓冲并继续真实 Back；
+- Handler 完成但没有调用 `allow()`：保留当前层并停留当前页面。
 
-`allow()` 没有返回值。停止、过期或重复调用不会改变结果。
-
-Handler 抛出的错误或返回的 rejected Promise 进入 Vue Router 的导航错误通道，可用 `router.onError()` 观察。
+`allow()` 无返回值；停止、完成或重复调用后失效。Handler 抛出的错误或 rejected Promise 通过目标 Window 的 `reportError()` 报告，Guard 本身继续保留。

@@ -1,7 +1,5 @@
 export interface Guard {
-  install(
-    app: import("vue", { with: { "resolution-mode": "import" } }).App,
-  ): void;
+  (): Promise<void>;
 }
 
 export type Handler = (allow: () => void) => void | PromiseLike<void>;

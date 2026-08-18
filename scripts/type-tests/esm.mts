@@ -1,25 +1,28 @@
 import {
   createGuard,
-  useGuard,
   type Guard,
   type Handler,
 } from "@revfanc/guard";
-import type { Plugin } from "vue";
-import type { Router } from "vue-router";
+// @ts-expect-error useGuard was removed in v0.8.0.
+import { useGuard } from "@revfanc/guard";
 
-declare const router: Router;
-const guard: Guard = createGuard(router);
-const plugin: Plugin = guard;
 const handler: Handler = (allow) => {
   const result: void = allow();
   void result;
 };
-const stop: () => void = useGuard(handler);
+const guard: Guard = createGuard(handler);
+const cleanup: Promise<void> = guard();
+declare const frame: Window;
+const frameGuard: Guard = createGuard(handler, frame);
+declare const allow: Parameters<Handler>[0];
 
-// @ts-expect-error createGuard accepts a Router, not a Handler.
-createGuard(handler);
-// @ts-expect-error useGuard accepts a Handler, not an options object.
-useGuard({ handler });
+// @ts-expect-error createGuard requires a Handler.
+createGuard({ handler });
+// @ts-expect-error target must be a Window.
+createGuard(handler, {});
+// @ts-expect-error allow accepts no arguments.
+allow(() => undefined);
 
-void plugin;
-void stop;
+void cleanup;
+void frameGuard;
+void useGuard;

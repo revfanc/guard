@@ -1,14 +1,16 @@
 # 工程结构与构建
 
-核心源码保持三层：
+核心源码分为三层：
 
-- `index.ts`：Vue 插件、注入、作用域清理和公开导出；
-- `router.ts`：把 Vue Router history、`beforeEach`、`afterEach` 适配为内部接口；
-- `runtime.ts`：Item 栈、Attempt 决策和 pending POP 协调。
+- `index.ts`：公开参数校验、默认 Window 选择和导出；
+- `history.ts`：History state、active/inactive 缓冲及 `popstate`；
+- `runtime.ts`：Window 级共享 Runtime、Item 栈、Attempt 和异步停止。
 
-Runtime 通过 `globalThis` 上的全局 `WeakMap` 按 Router 实例共享，支持重复模块和 HMR，同时不在 Router 对象上附加字段。Router 被垃圾回收后，对应 Runtime 也不会被注册表强引用。
+每个目标 Window 通过不可枚举的 `Symbol.for("@revfanc/guard.runtime.v1")` 属性共享 Runtime，从而协调重复模块、HMR 和同一页面的多次注册。不同 Window，包括 iframe，彼此隔离。
 
-构建输出包含 ESM、CommonJS 和各自的类型声明。包声明 `sideEffects: false`，Vue 与 Vue Router 均为 peer dependency。
+Handler、Item 栈和 pending Attempt 只存在于内存。可序列化的 active/inactive 标记才会写入缓冲记录的 `history.state`。
+
+包没有运行时依赖，输出 ESM、CommonJS 及各自的 TypeScript 声明，并声明 `sideEffects: false`。
 
 ```bash
 pnpm check

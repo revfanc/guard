@@ -1,58 +1,58 @@
 # @revfanc/guard
 
-A small Vue Router POP navigation guard.
+A small framework-independent guard for the browser Back button.
 
-- Vue 3.5+
-- Vue Router 4.5+ or 5
-- Browser, hash, and memory history
-- Back, Forward, and `go(N)`
-- ESM and CommonJS, typed with TypeScript
+- No runtime dependencies
+- Vanilla JavaScript, React, Vue, Svelte, and other browser frameworks
+- One same-URL History buffer for the first single-step Back
+- LIFO registrations and asynchronous decisions
+- ESM, CommonJS, and TypeScript declarations
 
 ```bash
 pnpm add @revfanc/guard
 ```
 
-Install the plugin once with the same Router instance used by the app:
-
 ```ts
-import { createApp } from "vue"
 import { createGuard } from "@revfanc/guard"
-import { router } from "./router"
-import App from "./App.vue"
 
-const app = createApp(App)
-const guard = createGuard(router)
-
-app.use(router)
-app.use(guard)
-app.mount("#app")
-```
-
-Register a layer from a component or composable:
-
-```ts
-import { useGuard } from "@revfanc/guard"
-
-const stop = useGuard(async (allow) => {
+const stop = createGuard(async (allow) => {
   if (await confirmLeaving()) {
     allow()
   }
 })
 
-// Optional. The current Vue scope also stops it automatically.
-stop()
+// Await cleanup before a programmatic navigation.
+await stop()
 ```
 
-Only the top layer handles a POP. Calling `allow()` consumes that layer. If a
-lower layer remains, Vue Router cancels the current POP; otherwise the original
-POP completes. Settling without `allow()` rejects the POP and keeps the layer.
+`createGuard()` immediately registers one layer and returns an idempotent
+asynchronous stop function. Browser Back only invokes the most recently
+registered Handler. Calling `allow()` consumes that layer; the real Back is
+performed only after the final layer allows.
 
-The package does not guard `push`, `replace`, reload, address-bar navigation, or
-cross-document navigation. It does not write `history.state`.
+The first registration pushes one same-URL buffer entry. Nested registrations
+share it. Creating that entry truncates an existing Forward stack, as required
+by the History API.
 
-`RouterHistory.listen()` is currently marked Alpha by Vue Router. The peer range
-is intentionally limited to versions below 6 and the behavior is integration
-tested against Vue Router 4.5.1 and 5.
+An optional same-origin `Window` can be guarded explicitly:
+
+```ts
+const stopFrame = createGuard(handler, iframe.contentWindow!)
+```
+
+Each Window owns an isolated Runtime. A cross-origin iframe must install the
+library within its own document.
+
+## Scope
+
+The supported navigation is a single browser Back or `history.go(-1)`.
+`history.go(-N)`, queued same-task Back calls, address-bar navigation, reload,
+tab closing, and descendant iframe history changes are not guaranteed.
+
+Call and await the returned Guard before `pushState`, `replaceState`, router
+navigation, or document navigation. Unknown History changes fail open instead
+of throwing library errors. Handler errors are reported through
+`window.reportError()`.
 
 ## Development
 

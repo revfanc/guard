@@ -64,18 +64,13 @@ const entries = {
 for (const [format, entry] of Object.entries(entries)) {
   assert.deepStrictEqual(
     Object.keys(entry).sort(),
-    ["createGuard", "useGuard"],
+    ["createGuard"],
     `${format} runtime exports changed.`,
   );
   assert.strictEqual(
     typeof entry.createGuard,
     "function",
     `${format} createGuard is not a function.`,
-  );
-  assert.strictEqual(
-    typeof entry.useGuard,
-    "function",
-    `${format} useGuard is not a function.`,
   );
 }
 

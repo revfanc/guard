@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "Guard"
-  text: "让 Vue Router 的 POP 先做决定"
-  tagline: 用插件绑定 Router，在组件中用一层 Guard 处理 Back、Forward 和 go(N)。
+  text: "让浏览器 Back 先经过业务决策"
+  tagline: 不依赖框架，用一个同 URL 缓冲和 LIFO 栈处理首次单步 Back。
   actions:
     - theme: brand
       text: 开始使用
@@ -13,24 +13,26 @@ hero:
       text: 查看 API
       link: /api
 features:
-  - title: Vue Router 原生语义
-    details: 只识别 RouterHistory 的 POP，由 beforeEach 返回 false 或放行原导航。
-  - title: 组件作用域
-    details: useGuard 返回幂等停止函数，并通过 onScopeDispose 自动清理。
-  - title: 多层 LIFO
-    details: 每次 POP 只交给栈顶 Handler，适合对话框和嵌套流程逐层关闭。
+  - title: 框架无关
+    details: 不依赖 Vue、React 或路由器，可用于任意浏览器应用。
+  - title: 首次 Back
+    details: 首层 Guard 建立一个同 URL 缓冲，直接进入页面后的第一次 Back 也能触发 Handler。
+  - title: LIFO 多层
+    details: 每次 Back 只调用栈顶 Handler，适合页面、弹窗和嵌套流程逐层处理。
 ---
 
 ## 最小接入
 
 ```ts
-import { useGuard } from "@revfanc/guard"
+import { createGuard } from "@revfanc/guard"
 
-useGuard(async (allow) => {
+const stop = createGuard(async (allow) => {
   if (await confirmLeaving()) allow()
 })
+
+await stop()
 ```
 
 ::: warning 能力边界
-本库只处理 Vue Router POP：Back、Forward 和 `go(N)`。`push`、`replace`、刷新、地址栏和跨文档导航不在处理范围内。
+只保证当前 Window 的单步浏览器 Back 或 `history.go(-1)`。多步穿越、地址栏、刷新、关闭标签页和未协作 iframe 的 History 变化不在保证范围。
 :::
