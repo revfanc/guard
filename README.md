@@ -51,8 +51,8 @@ tab closing, and descendant iframe history changes are not guaranteed.
 
 Call and await the returned Guard before `pushState`, `replaceState`, router
 navigation, or document navigation. Unknown History changes fail open instead
-of throwing library errors. Handler errors are reported through
-`window.reportError()`.
+of throwing library errors, and the affected Guard stack expires instead of
+moving to a new page. Handler errors are reported through `window.reportError()`.
 
 ## Development
 

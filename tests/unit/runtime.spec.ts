@@ -28,7 +28,6 @@ class Fake implements History, Sentinel {
   releaseError?: Error;
   restoreError?: Error;
   settleError?: Error;
-  private deferred: Array<() => void> = [];
   private listener?: (intercept: () => void) => void;
   private place: Place = "other";
 
@@ -40,14 +39,6 @@ class Fake implements History, Sentinel {
     return this.place === "base";
   }
 
-  defer(listener: () => void): void {
-    this.deferred.push(listener);
-  }
-
-  flush(): void {
-    for (const listener of this.deferred.splice(0)) listener();
-  }
-
   inactive(): boolean {
     return this.place === "inactive";
   }
@@ -56,7 +47,11 @@ class Fake implements History, Sentinel {
     this.listener = listener;
   }
 
-  pop(place: Exclude<Place, "active">): ReturnType<typeof vi.fn> {
+  move(place: Place): void {
+    this.place = place;
+  }
+
+  pop(place: Place): ReturnType<typeof vi.fn> {
     this.place = place;
     const intercept = vi.fn();
     this.listener?.(intercept);
@@ -88,6 +83,32 @@ describe("Runtime", () => {
     runtime.add(vi.fn());
 
     expect(history.create).toHaveBeenCalledOnce();
+  });
+
+  it("expires the previous page when a new registration loses ownership", async () => {
+    const previous = vi.fn();
+    const stopPrevious = runtime.add(previous);
+    history.move("other");
+    const current = vi.fn();
+    runtime.add(current);
+
+    await expect(stopPrevious()).resolves.toBeUndefined();
+    expect(history.create).toHaveBeenCalledTimes(2);
+
+    history.pop("base");
+    expect(previous).not.toHaveBeenCalled();
+    expect(current).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a page registered while entering its active buffer", () => {
+    const handler = vi.fn();
+    runtime.add(handler);
+
+    const intercept = history.pop("active");
+    expect(intercept).not.toHaveBeenCalled();
+
+    history.pop("base");
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it("dispatches and consumes items in LIFO order", async () => {
@@ -264,45 +285,52 @@ describe("Runtime", () => {
     expect(history.back).toHaveBeenCalledOnce();
   });
 
-  it("fails open and re-arms after an unknown POP", () => {
+  it("fails open and expires the stack after an unknown POP", async () => {
     const handler = vi.fn();
-    runtime.add(handler);
+    const stop = runtime.add(handler);
     const intercept = history.pop("other");
 
     expect(intercept).not.toHaveBeenCalled();
     expect(handler).not.toHaveBeenCalled();
-    history.flush();
-    expect(history.create).toHaveBeenCalledTimes(2);
+    await expect(stop()).resolves.toBeUndefined();
+    expect(history.create).toHaveBeenCalledOnce();
   });
 
-  it("finishes cleanup and only re-arms new items after an unknown POP", async () => {
+  it("expires cleanup and new items after an unknown POP", async () => {
     const first = runtime.add(vi.fn());
     const cleanup = first();
     const next = vi.fn();
-    runtime.add(next);
+    const stopNext = runtime.add(next);
 
     const intercept = history.pop("other");
 
     expect(intercept).not.toHaveBeenCalled();
     await expect(cleanup).resolves.toBeUndefined();
-    history.flush();
-    expect(history.create).toHaveBeenCalledTimes(2);
-
-    history.pop("base");
-    expect(next).toHaveBeenCalledOnce();
+    await expect(stopNext()).resolves.toBeUndefined();
+    expect(history.create).toHaveBeenCalledOnce();
+    expect(next).not.toHaveBeenCalled();
   });
 
-  it("does not intercept when restoring the buffer fails", () => {
+  it("does not intercept and expires the stack when restore fails", async () => {
     const handler = vi.fn();
     history.restoreError = new Error("push failed");
-    runtime.add(handler);
+    const stop = runtime.add(handler);
 
     const intercept = history.pop("base");
 
     expect(intercept).not.toHaveBeenCalled();
     expect(handler).not.toHaveBeenCalled();
-    history.flush();
-    expect(history.create).toHaveBeenCalledTimes(2);
+    await expect(stop()).resolves.toBeUndefined();
+    expect(history.create).toHaveBeenCalledOnce();
+  });
+
+  it("expires the last item when releasing the buffer fails", async () => {
+    history.releaseError = new Error("replace failed");
+    const stop = runtime.add(vi.fn());
+
+    await expect(stop()).resolves.toBeUndefined();
+    expect(history.create).toHaveBeenCalledOnce();
+    expect(report).not.toHaveBeenCalled();
   });
 
   it("does not throw when History coordination fails", async () => {

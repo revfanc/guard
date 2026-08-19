@@ -94,22 +94,15 @@ export class Runtime implements Shared {
       if (owned) {
         state.items.push(current);
       } else {
-        const items = [...state.items, current];
-        this.attempt = undefined;
-        this.state = undefined;
-        this.activate(items);
+        this.expire(state.items);
+        this.activate([current]);
       }
     }
 
-    let stopped = false;
-    const stop: Guard = () => {
-      if (!stopped) {
-        stopped = true;
-        this.stop(current);
-      }
+    return () => {
+      this.stop(current);
       return current.closed;
     };
-    return stop;
   }
 
   private activate(items: Item[]): void {
@@ -141,17 +134,20 @@ export class Runtime implements Shared {
     const state = this.state;
     if (!state) return;
     let base = false;
+    let active = false;
     try {
       base = state.sentinel.base();
+      if (!base) active = state.sentinel.active();
     } catch {
       // Unknown traversal is allowed below.
     }
     if (!base) {
-      const items = state.phase === "active" ? state.items : state.restart;
-      if (state.phase === "cleaning") this.finish(state.closing);
-      this.attempt = undefined;
-      this.state = undefined;
-      this.history.defer(() => this.activate(items));
+      if (active) return;
+      this.expire(
+        state.phase === "active"
+          ? state.items
+          : [state.closing, ...state.restart],
+      );
       return;
     }
 
@@ -159,9 +155,7 @@ export class Runtime implements Shared {
       try {
         state.sentinel.restore();
       } catch {
-        this.state = undefined;
-        this.attempt = undefined;
-        this.history.defer(() => this.activate(state.items));
+        this.expire(state.items);
         return;
       }
       intercept();
@@ -292,10 +286,14 @@ export class Runtime implements Shared {
     try {
       state.sentinel.release();
     } catch {
-      this.state = undefined;
-      this.finish(closing);
-      this.history.defer(() => this.activate(cleaning.restart));
+      this.expire([closing, ...cleaning.restart]);
     }
+  }
+
+  private expire(items: Item[]): void {
+    this.attempt = undefined;
+    this.state = undefined;
+    for (const current of items) this.finish(current);
   }
 
   private finish(current: Item): void {

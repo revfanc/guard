@@ -20,7 +20,6 @@ export interface Sentinel {
 export interface History {
   back(): void;
   create(): Sentinel;
-  defer(listener: () => void): void;
   inactive(): boolean;
   listen(listener: (intercept: () => void) => void): void;
 }
@@ -224,9 +223,6 @@ export function createHistory(target: Window): History {
       target.history.back();
     },
     create: () => sentinel(target),
-    defer(listener): void {
-      target.setTimeout(listener, 0);
-    },
     inactive(): boolean {
       const current: unknown = target.history.state;
       return valid(current) && parse(current)?.role === "inactive";

@@ -48,6 +48,28 @@ test.describe("framework-independent Guard", () => {
     await expect(page).toHaveURL(/\/$/);
   });
 
+  test("isolates a stale Guard across same-URL pages", async ({ page }) => {
+    await protectedPage(page);
+    const url = page.url();
+    await page.getByTestId("next-stale").click();
+    await expect(page).toHaveURL(url);
+    await expect(page.getByTestId("page")).toHaveText("Second");
+
+    await back(page);
+    await expect(page.getByTestId("b-attempts")).toHaveText("1");
+    await expect(page.getByTestId("a-attempts")).toHaveText("0");
+    await page.getByTestId("allow-b").click();
+
+    await expect(page).toHaveURL(url);
+    await expect(page.getByTestId("page")).toHaveText("Protected");
+    await expect(page.getByTestId("decision")).toHaveText("a:added");
+
+    await back(page);
+    await expect(page.getByTestId("a-attempts")).toHaveText("1");
+    await expect(page.getByTestId("b-attempts")).toHaveText("1");
+    await page.getByTestId("deny-a").click();
+  });
+
   test("does not duplicate a pending Handler", async ({ page }) => {
     await protectedPage(page);
     await back(page);
@@ -81,7 +103,7 @@ test.describe("framework-independent Guard", () => {
       .toBeUndefined();
   });
 
-  test("fails open for go(-2) without calling the Handler", async ({ page }) => {
+  test("fails open and expires the Guard for go(-2)", async ({ page }) => {
     await protectedPage(page);
 
     await page.getByTestId("minus-two").click();
@@ -91,7 +113,7 @@ test.describe("framework-independent Guard", () => {
     await expect(page.getByTestId("a-attempts")).toHaveText("0");
     await expect
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toMatch(/^a:/);
+      .toBeUndefined();
   });
 
   test("adopts an active buffer across reload without growing history", async ({ page }) => {

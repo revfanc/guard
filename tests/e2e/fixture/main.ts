@@ -15,6 +15,7 @@ root.innerHTML = `
       <button data-testid="back">Back</button>
       <button data-testid="forward">Forward</button>
       <button data-testid="minus-two">go(-2)</button>
+      <button data-testid="next-stale">Enter B without stopping A</button>
       <button data-testid="add-a">Add A</button>
       <button data-testid="add-b">Add B</button>
       <button data-testid="allow-a">Allow A</button>
@@ -54,22 +55,40 @@ addEventListener(
 );
 
 function screen(): string {
+  const state: unknown = history.state;
+  if (
+    state !== null &&
+    typeof state === "object" &&
+    "screen" in state &&
+    typeof state.screen === "string"
+  ) {
+    return state.screen;
+  }
   return new URLSearchParams(location.search).get("screen") ?? "origin";
 }
 
+let rendered = screen();
+
 function render(): void {
   const current = screen();
-  const protectedPage = current === "protected";
-  query("page").textContent = protectedPage
+  const guarded = current === "protected" || current === "second";
+  query("page").textContent = current === "protected"
     ? "Protected"
+    : current === "second"
+      ? "Second"
     : current === "origin"
       ? "Origin"
       : current;
   query<HTMLButtonElement>("enter").hidden = current !== "origin";
-  query("controls").hidden = !protectedPage;
+  query("controls").hidden = !guarded;
+  rendered = current;
 }
 
-addEventListener("popstate", render);
+addEventListener("popstate", () => {
+  const previous = rendered;
+  render();
+  if (previous === "second" && rendered === "protected") add("a");
+});
 
 function handler(name: Name): Handler {
   return (allow) => {
@@ -119,6 +138,11 @@ query("enter").addEventListener("click", () => {
 query("back").addEventListener("click", () => history.back());
 query("forward").addEventListener("click", () => history.forward());
 query("minus-two").addEventListener("click", () => history.go(-2));
+query("next-stale").addEventListener("click", () => {
+  history.pushState({ screen: "second" }, "", location.href);
+  render();
+  add("b");
+});
 query("add-a").addEventListener("click", () => add("a"));
 query("add-b").addEventListener("click", () => add("b"));
 query("allow-a").addEventListener("click", () => decide("a", true));

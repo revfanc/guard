@@ -25,7 +25,7 @@ const stop = createGuard(handler, iframe.contentWindow!)
 - 没有可用的浏览器 Window；
 - `target` 不是同源且可访问的 Window，或不具备 History API。
 
-History 状态冲突、History 写入失败和未知穿越不会抛出库内部异常，而是 fail-open。
+History 状态冲突、History 写入失败和未知穿越不会抛出库内部异常，而是 fail-open，并结束无法确认归属的 Guard 作用域。
 
 ## `Guard`
 
