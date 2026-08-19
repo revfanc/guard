@@ -30,7 +30,7 @@ if (sideEffectBundle !== "") {
 
 const createBundle = await bundleEntry("scripts/tree-shaking/create.mjs");
 
-if (!createBundle.includes("@revfanc/guard.runtime.v1")) {
+if (!createBundle.includes("__revfanc_guard__")) {
   throw new Error(
     "Tree-shaking lost createGuard from the usage bundle.",
   );

@@ -19,9 +19,9 @@ const stop = createGuard(async (allow) => {
 })
 ```
 
-首次注册会建立一条同 URL History 缓冲。后续注册共享该缓冲，并按 LIFO 顺序处理。
+注册会建立或接管一条同 URL History 缓冲。Handler 应返回覆盖完整决策周期的 Promise；pending 期间后续顺序 Back 不会重复调用 Handler。
 
-Handler 应返回覆盖完整决策周期的 Promise。决策 pending 期间再次顺序触发 Back，不会重复调用 Handler。
+一个 Window 同时只有一个 Handler。应用需要页面、Dialog 等多级回调时，应由业务维护当前回调或栈，再从唯一 Handler 中分发。
 
 ## 停止
 
@@ -29,13 +29,11 @@ Handler 应返回覆盖完整决策周期的 Promise。决策 pending 期间再�
 await stop()
 ```
 
-停止函数幂等。主动导航前必须先等待它完成：
+停止函数幂等。主动导航前必须等待它完成：
 
 ```ts
 await stop()
 location.assign("/next")
 ```
 
-## 生命周期框架
-
-React、Vue 等框架只负责在自身生命周期中调用停止函数，Guard 核心不依赖任何框架。参见 [React](/frameworks/react) 和 [Vue](/frameworks/vue)。
+React、Vue 等框架只负责在自身生命周期内停止和重新创建 Guard。参见 [React](/frameworks/react) 和 [Vue](/frameworks/vue)。

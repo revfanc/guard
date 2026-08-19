@@ -34,7 +34,7 @@ export default defineConfig({
         items: [
           { text: "快速开始", link: "/guide/getting-started" },
           { text: "生命周期", link: "/guide/lifecycle" },
-          { text: "多层 Guard", link: "/guide/nested" },
+          { text: "单一 Guard", link: "/guide/single" },
           { text: "工程结构与构建", link: "/guide/project-structure" },
         ],
       },
@@ -43,7 +43,6 @@ export default defineConfig({
         items: [
           { text: "React", link: "/frameworks/react" },
           { text: "Vue", link: "/frameworks/vue" },
-          { text: "iframe", link: "/frameworks/iframe" },
         ],
       },
       {

@@ -3,7 +3,7 @@ import {
   type Guard,
   type Handler,
 } from "@revfanc/guard";
-// @ts-expect-error useGuard was removed in v0.8.0.
+// @ts-expect-error useGuard is not public.
 import { useGuard } from "@revfanc/guard";
 
 const handler: Handler = (allow) => {
@@ -13,16 +13,14 @@ const handler: Handler = (allow) => {
 const guard: Guard = createGuard(handler);
 const cleanup: Promise<void> = guard();
 declare const frame: Window;
-const frameGuard: Guard = createGuard(handler, frame);
 declare const allow: Parameters<Handler>[0];
 
 // @ts-expect-error createGuard requires a Handler.
 createGuard({ handler });
-// @ts-expect-error target must be a Window.
-createGuard(handler, {});
+// @ts-expect-error createGuard only accepts a Handler.
+createGuard(handler, frame);
 // @ts-expect-error allow accepts no arguments.
 allow(() => undefined);
 
 void cleanup;
-void frameGuard;
 void useGuard;

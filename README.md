@@ -3,9 +3,9 @@
 A small framework-independent guard for the browser Back button.
 
 - No runtime dependencies
-- Vanilla JavaScript, React, Vue, Svelte, and other browser frameworks
-- One same-URL History buffer for the first single-step Back
-- LIFO registrations and asynchronous decisions
+- One same-URL History buffer
+- One active Handler per Window
+- Asynchronous decisions and cleanup
 - ESM, CommonJS, and TypeScript declarations
 
 ```bash
@@ -21,38 +21,32 @@ const stop = createGuard(async (allow) => {
   }
 })
 
-// Await cleanup before a programmatic navigation.
+// Await cleanup before programmatic navigation.
 await stop()
 ```
 
-`createGuard()` immediately registers one layer and returns an idempotent
-asynchronous stop function. Browser Back only invokes the most recently
-registered Handler. Calling `allow()` consumes that layer; the real Back is
-performed only after the final layer allows.
+`createGuard()` immediately creates or adopts one same-URL buffer. Browser Back
+restores that buffer before invoking the Handler. Calling `allow()` releases the
+buffer and continues the real Back; otherwise the page stays in place.
 
-The first registration pushes one same-URL buffer entry. Nested registrations
-share it. Creating that entry truncates an existing Forward stack, as required
-by the History API.
-
-An optional same-origin `Window` can be guarded explicitly:
-
-```ts
-const stopFrame = createGuard(handler, iframe.contentWindow!)
-```
-
-Each Window owns an isolated Runtime. A cross-origin iframe must install the
-library within its own document.
+A Window has one active Handler. A later `createGuard()` replaces the previous
+Handler without adding another History entry. The previous stop function resolves
+immediately and cannot affect the replacement.
 
 ## Scope
 
-The supported navigation is a single browser Back or `history.go(-1)`.
-`history.go(-N)`, queued same-task Back calls, address-bar navigation, reload,
-tab closing, and descendant iframe history changes are not guaranteed.
+The supported navigation is a single browser Back or `history.go(-1)`. Call and
+await the returned Guard before `pushState`, `replaceState`, router navigation,
+or document navigation. The stop function is idempotent and completes after the
+buffer returns to the untagged page entry.
 
-Call and await the returned Guard before `pushState`, `replaceState`, router
-navigation, or document navigation. Unknown History changes fail open instead
-of throwing library errors, and the affected Guard stack expires instead of
-moving to a new page. Handler errors are reported through `window.reportError()`.
+The active buffer can be adopted after reload without growing History. Ordinary
+plain-object History state is preserved. Unsupported state, unknown traversal,
+external History changes, and write failures fail open without library errors.
+
+Forward, `history.go(-N)`, queued same-task Back calls, address-bar navigation,
+reload itself, tab closing, iframe coordination, duplicate package runtimes, and
+multiple Handler stacks are not guaranteed.
 
 ## Development
 

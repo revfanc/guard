@@ -13,11 +13,8 @@ root.innerHTML = `
     <button data-testid="enter">Enter protected page</button>
     <section data-testid="controls">
       <button data-testid="back">Back</button>
-      <button data-testid="forward">Forward</button>
       <button data-testid="minus-two">go(-2)</button>
-      <button data-testid="next-stale">Enter B without stopping A</button>
-      <button data-testid="add-a">Add A</button>
-      <button data-testid="add-b">Add B</button>
+      <button data-testid="add-b">Use B</button>
       <button data-testid="allow-a">Allow A</button>
       <button data-testid="deny-a">Deny A</button>
       <button data-testid="allow-b">Allow B</button>
@@ -29,7 +26,6 @@ root.innerHTML = `
     <output data-testid="b-attempts">0</output>
     <output data-testid="popstates">0</output>
     <output data-testid="decision">idle</output>
-    <div data-testid="frame-host"></div>
   </main>`;
 
 const query = <T extends HTMLElement>(name: string): T =>
@@ -67,28 +63,14 @@ function screen(): string {
   return new URLSearchParams(location.search).get("screen") ?? "origin";
 }
 
-let rendered = screen();
-
 function render(): void {
   const current = screen();
-  const guarded = current === "protected" || current === "second";
-  query("page").textContent = current === "protected"
-    ? "Protected"
-    : current === "second"
-      ? "Second"
-    : current === "origin"
-      ? "Origin"
-      : current;
+  query("page").textContent = current === "protected" ? "Protected" : "Origin";
   query<HTMLButtonElement>("enter").hidden = current !== "origin";
-  query("controls").hidden = !guarded;
-  rendered = current;
+  query("controls").hidden = current !== "protected";
 }
 
-addEventListener("popstate", () => {
-  const previous = rendered;
-  render();
-  if (previous === "second" && rendered === "protected") add("a");
-});
+addEventListener("popstate", render);
 
 function handler(name: Name): Handler {
   return (allow) => {
@@ -102,10 +84,8 @@ function handler(name: Name): Handler {
   };
 }
 
-function add(name: Name, target?: Window): void {
-  const previous = stops.get(name);
-  if (previous) void previous();
-  stops.set(name, createGuard(handler(name), target));
+function add(name: Name): void {
+  stops.set(name, createGuard(handler(name)));
   query("decision").textContent = `${name}:added`;
 }
 
@@ -136,14 +116,7 @@ query("enter").addEventListener("click", () => {
   add("a");
 });
 query("back").addEventListener("click", () => history.back());
-query("forward").addEventListener("click", () => history.forward());
 query("minus-two").addEventListener("click", () => history.go(-2));
-query("next-stale").addEventListener("click", () => {
-  history.pushState({ screen: "second" }, "", location.href);
-  render();
-  add("b");
-});
-query("add-a").addEventListener("click", () => add("a"));
 query("add-b").addEventListener("click", () => add("b"));
 query("allow-a").addEventListener("click", () => decide("a", true));
 query("deny-a").addEventListener("click", () => decide("a", false));
@@ -162,15 +135,3 @@ if (state === null || typeof state !== "object") {
 render();
 
 if (current === "protected") add("a");
-if (current === "iframe-self" || current === "iframe-target") {
-  query("frame-host").innerHTML = `
-    <iframe data-testid="frame" src="/frame.html?mode=${
-      current === "iframe-self" ? "self" : "target"
-    }"></iframe>`;
-  if (current === "iframe-target") {
-    query<HTMLIFrameElement>("frame").addEventListener("load", (event) => {
-      const frame = (event.currentTarget as HTMLIFrameElement).contentWindow;
-      if (frame) add("a", frame);
-    });
-  }
-}

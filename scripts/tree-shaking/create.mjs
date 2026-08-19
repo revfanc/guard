@@ -1,5 +1,5 @@
 import { createGuard } from "@revfanc/guard";
 
-export function create(handler, target) {
-  return createGuard(handler, target);
+export function create(handler) {
+  return createGuard(handler);
 }

@@ -30,6 +30,17 @@ const expectedFiles = [
 const files = manifest.files.map(({ path }) => path).sort();
 assert.deepStrictEqual(files, expectedFiles, "Unexpected packed files.");
 
+const esm = readFileSync("dist/index.js", "utf8");
+for (const name of [
+  "Reflect.",
+  "Symbol",
+  "Object.getOwnPropertySymbols",
+  "Object.getOwnPropertyDescriptors",
+  "Object.defineProperties",
+]) {
+  assert.ok(!esm.includes(name), `ESM bundle uses ${name}.`);
+}
+
 assert.deepStrictEqual(
   {
     main: packageJson.main,

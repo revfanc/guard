@@ -15,15 +15,14 @@ async function back(page: Page): Promise<void> {
   await expect(page.getByTestId("popstates")).toHaveText(String(current + 1));
 }
 
-test.describe("framework-independent Guard", () => {
-  test("denies and then allows the first single-step Back", async ({ page }) => {
+test.describe("single Guard", () => {
+  test("denies and then allows the first Back", async ({ page }) => {
     await protectedPage(page);
 
     await back(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
     await page.getByTestId("deny-a").click();
     await expect(page).toHaveURL(/screen=protected/);
-    await expect(page.getByTestId("page")).toHaveText("Protected");
 
     await back(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("2");
@@ -32,51 +31,25 @@ test.describe("framework-independent Guard", () => {
     await expect(page.getByTestId("page")).toHaveText("Origin");
   });
 
-  test("consumes nested registrations in LIFO order", async ({ page }) => {
+  test("replaces the Handler without growing history", async ({ page }) => {
     await protectedPage(page);
+    const length = await page.evaluate(() => history.length);
+
     await page.getByTestId("add-b").click();
+    await expect.poll(() => page.evaluate(() => history.length)).toBe(length);
+    await page.getByTestId("stop-a").click();
+    await expect(page.getByTestId("decision")).toHaveText("a:stopped");
 
     await back(page);
-    await expect(page.getByTestId("b-attempts")).toHaveText("1");
     await expect(page.getByTestId("a-attempts")).toHaveText("0");
-    await page.getByTestId("allow-b").click();
-    await expect(page).toHaveURL(/screen=protected/);
-
-    await back(page);
-    await expect(page.getByTestId("a-attempts")).toHaveText("1");
-    await page.getByTestId("allow-a").click();
-    await expect(page).toHaveURL(/\/$/);
-  });
-
-  test("isolates a stale Guard across same-URL pages", async ({ page }) => {
-    await protectedPage(page);
-    const url = page.url();
-    await page.getByTestId("next-stale").click();
-    await expect(page).toHaveURL(url);
-    await expect(page.getByTestId("page")).toHaveText("Second");
-
-    await back(page);
     await expect(page.getByTestId("b-attempts")).toHaveText("1");
-    await expect(page.getByTestId("a-attempts")).toHaveText("0");
-    await page.getByTestId("allow-b").click();
-
-    await expect(page).toHaveURL(url);
-    await expect(page.getByTestId("page")).toHaveText("Protected");
-    await expect(page.getByTestId("decision")).toHaveText("a:added");
-
-    await back(page);
-    await expect(page.getByTestId("a-attempts")).toHaveText("1");
-    await expect(page.getByTestId("b-attempts")).toHaveText("1");
-    await page.getByTestId("deny-a").click();
+    await page.getByTestId("deny-b").click();
   });
 
   test("does not duplicate a pending Handler", async ({ page }) => {
     await protectedPage(page);
     await back(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
-    await expect
-      .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toMatch(/^a:/);
 
     await back(page);
     await expect(page.getByTestId("a-attempts")).toHaveText("1");
@@ -84,7 +57,7 @@ test.describe("framework-independent Guard", () => {
     await expect(page).toHaveURL(/screen=protected/);
   });
 
-  test("stops asynchronously and rejects inactive Forward", async ({ page }) => {
+  test("stops asynchronously at the page entry", async ({ page }) => {
     await protectedPage(page);
     await page.getByTestId("stop-a").click();
     await expect(page.getByTestId("decision")).toHaveText("a:stopped");
@@ -92,18 +65,12 @@ test.describe("framework-independent Guard", () => {
       .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
       .toBeUndefined();
 
-    const current = Number(await page.getByTestId("popstates").textContent());
-    await page.evaluate(() => history.forward());
-    await expect
-      .poll(async () => Number(await page.getByTestId("popstates").textContent()))
-      .toBeGreaterThan(current);
-    await expect(page).toHaveURL(/screen=protected/);
-    await expect
-      .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toBeUndefined();
+    await page.evaluate(() => history.back());
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByTestId("page")).toHaveText("Origin");
   });
 
-  test("fails open and expires the Guard for go(-2)", async ({ page }) => {
+  test("fails open for go(-2)", async ({ page }) => {
     await protectedPage(page);
 
     await page.getByTestId("minus-two").click();
@@ -111,12 +78,9 @@ test.describe("framework-independent Guard", () => {
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByTestId("page")).toHaveText("Origin");
     await expect(page.getByTestId("a-attempts")).toHaveText("0");
-    await expect
-      .poll(() => page.evaluate(() => history.state?.__revfanc_guard__))
-      .toBeUndefined();
   });
 
-  test("adopts an active buffer across reload without growing history", async ({ page }) => {
+  test("adopts the buffer across reload", async ({ page }) => {
     await protectedPage(page);
     const length = await page.evaluate(() => history.length);
     const marker = await page.evaluate(
@@ -151,30 +115,5 @@ test.describe("framework-independent Guard", () => {
     await page.getByTestId("allow-a").click();
     await expect(page.getByTestId("outside")).toHaveText("Outside");
     await expect(page).toHaveURL(/outside\.html$/);
-  });
-
-  test("runs independently inside an iframe", async ({ page }) => {
-    await page.goto("/?screen=iframe-self");
-    const frame = page.frameLocator('[data-testid="frame"]');
-    await expect(frame.getByTestId("frame-page")).toHaveText("Frame");
-
-    await page.evaluate(() => history.back());
-
-    await expect(frame.getByTestId("frame-attempts")).toHaveText("1");
-    await frame.getByTestId("frame-deny").click();
-    await expect(page.getByTestId("page")).toHaveText("iframe-self");
-  });
-
-  test("can target a same-origin iframe explicitly", async ({ page }) => {
-    await page.goto("/?screen=iframe-target");
-    const frame = page.frameLocator('[data-testid="frame"]');
-    await expect(frame.getByTestId("frame-page")).toHaveText("Frame");
-    await expect(page.getByTestId("decision")).toHaveText("a:added");
-
-    await page.evaluate(() => history.back());
-
-    await expect(page.getByTestId("a-attempts")).toHaveText("1");
-    await expect(frame.getByTestId("frame-attempts")).toHaveText("0");
-    await page.getByTestId("deny-a").dispatchEvent("click");
   });
 });
